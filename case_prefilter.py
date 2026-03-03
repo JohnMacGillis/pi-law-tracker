@@ -3,15 +3,18 @@ case_prefilter.py
 Keyword-based pre-qualification of court decisions.
 
 Runs BEFORE the Claude API call to discard obvious non-PI cases at zero cost.
-Expected to eliminate ~80% of RSS entries (contract, criminal, family, admin law).
 
-Strategy:
-  1. Hard-reject on strong exclusion keywords (criminal, family, tax, etc.)
-  2. Count PI-positive keywords in the text
-  3. Pass to Claude only if enough PI keywords are found
+Two-tier matching strategy:
+  Tier 1 — HIGH-CONFIDENCE keywords: finding just ONE of these almost
+            certainly means it's a PI damages case.  Pass immediately.
 
-The filter errs on the side of inclusion — a few false positives (sent to
-Claude unnecessarily) are fine; false negatives (real PI cases skipped) are not.
+  Tier 2 — SUPPORTING keywords: individually too broad, but 3+ together
+            suggest PI.  Pass if threshold met.
+
+  EXCLUSION keywords: any match → hard reject regardless of other keywords.
+
+Expected to eliminate ~75-85% of RSS entries (contract, criminal, family,
+administrative, regulatory, IP, tax, etc.).
 """
 
 import logging
@@ -19,166 +22,200 @@ import logging
 logger = logging.getLogger(__name__)
 
 
-# ── PI-positive keywords ───────────────────────────────────────────────────────
-# Finding 2+ of these → likely worth sending to Claude
+# ── Tier 1: HIGH-CONFIDENCE PI keywords ──────────────────────────────────────
+# Finding ANY ONE of these → almost certainly a PI damages case.
+# These terms rarely (if ever) appear in non-PI decisions.
 
-_PI_KEYWORDS = [
-    # Core damages vocabulary
+_HIGH_CONFIDENCE = [
+    # The defining Canadian PI damages category
     "non-pecuniary",
     "nonpecuniary",
+
+    # PI-specific damages heads
     "pain and suffering",
+    "cost of future care",
+    "future care costs",
+    "loss of housekeeping",
+    "loss of competitive advantage",
+    "in trust claim",
+
+    # Accident types that are almost exclusively PI
+    "slip and fall",
+    "trip and fall",
+    "motor vehicle accident",
+    "motor vehicle collision",
+    "automobile accident",
+    " mva ",
+    "(mva)",
+
+    # Injury-specific clinical terms
+    "whiplash",
+    "soft tissue injury",
+    "chronic pain syndrome",
+    "traumatic brain injury",
+    "acquired brain injury",
+    "spinal cord injury",
+    "disc herniation",
+    "rotator cuff",
+
+    # PI-specific legal phrases
+    "personal injury damages",
+    "quantum of damages",
+    "assessment of damages",
+    "occupiers' liability act",
+    "occupiers liability act",
+    "dog owners' liability",
+    "dog owners liability",
+    "icbc",
+]
+
+# ── Tier 2: SUPPORTING keywords ───────────────────────────────────────────────
+# These appear in many civil cases, not just PI.
+# Require 3+ to pass (individually too broad).
+
+_SUPPORTING = [
     "general damages",
     "special damages",
     "pecuniary damages",
-    "future care",
-    "cost of future care",
     "income loss",
     "loss of income",
-    "loss of earning",
-    "future earning",
+    "loss of earnings",
+    "future earnings",
     "aggravated damages",
     "punitive damages",
-    "quantum of damages",
-    "assessment of damages",
-    "damages awarded",
-
-    # Injury / accident types
-    "personal injury",
-    "bodily injury",
-    "motor vehicle accident",
-    "motor vehicle collision",
-    " mva ",
-    "slip and fall",
-    "trip and fall",
-    "occupiers' liability",
-    "occupier's liability",
-    "occupiers liability",
-    "dog bite",
-    "product liability",
-    "medical malpractice",
-    "medical negligence",
-    "wrongful death",
-
-    # Medical / clinical indicators
-    "chronic pain",
-    "soft tissue",
-    "whiplash",
-    "fracture",
-    "traumatic brain injury",
-    "spinal cord",
-    "disc herniation",
-    "physiotherapy",
-    "medical expenses",
-    "treatment costs",
-    "functional capacity",
-    "disability",
-    "permanent impairment",
-
-    # Legal concepts common in PI
     "tort",
     "duty of care",
     "standard of care",
     "contributory negligence",
-    "vicarious liability",
+    "bodily injury",
+    "personal injury",
     "plaintiff's injuries",
-
-    # Insurance indicators
-    "icbc",            # BC auto insurer
-    "insurance adjuster",
-    "accident benefit",
-    "statutory accident",
+    "the plaintiff suffered",
+    "injured plaintiff",
+    "chronic pain",
+    "physiotherapy",
+    "medical expenses",
+    "disability",
+    "permanent impairment",
+    "functional capacity",
+    "accident benefits",
+    "statutory accident benefits",
 ]
 
-# ── Strong exclusion keywords ─────────────────────────────────────────────────
-# Any one of these → very unlikely to be a PI damages case → skip immediately
+# ── EXCLUSION keywords ────────────────────────────────────────────────────────
+# Any one of these → hard reject, even if PI keywords are present.
+# Covers criminal, family, tax, IP, immigration, labour, etc.
 
-_EXCLUSION_KEYWORDS = [
+_EXCLUSION = [
     # Criminal law
     "criminal code",
-    "criminal negligence",
     "the accused",
     "guilty plea",
     "not guilty",
+    "criminal negligence",
+    "manslaughter",
+    "impaired driving",
+    "dangerous driving",
     " sentence ",
     "imprisonment",
-    "probation",
+    "probation order",
     " parole ",
     "crown counsel",
     "crown attorney",
     "indictment",
-    "conviction",
+    "criminal conviction",
 
     # Family law
     "divorce act",
-    "matrimonial",
+    "matrimonial property",
     "child custody",
     "child support",
     "spousal support",
     "parenting order",
     "adoption order",
     "child protection",
+    "children's aid",
 
-    # Tax / financial
+    # Tax
     "income tax act",
-    "tax court",
+    "tax court of canada",
     "tax appeal",
-    "excise tax",
-    "hst appeal",
-    "bankruptcy and insolvency",
+    "excise tax act",
+    "gst/hst",
+
+    # Insolvency
+    "bankruptcy and insolvency act",
+    "companies' creditors arrangement",
+    "trustee in bankruptcy",
+    "proposal to creditors",
 
     # Regulatory / administrative
     "immigration and refugee",
-    "refugee protection",
-    "deportation",
-    "zoning bylaw",
-    "municipal planning",
-    "labour arbitration",
+    "refugee protection division",
+    "deportation order",
+    "labour relations board",
     "collective agreement",
     "grievance arbitration",
+    "workers' compensation appeal",
+    "workplace safety and insurance",
+    "wsib appeal",
 
     # IP / commercial
-    "intellectual property",
-    "trademark infringement",
     "patent infringement",
+    "trademark infringement",
     "copyright infringement",
+    "passing off",
     "securities commission",
+    "securities act",
+
+    # Municipal / land use
+    "zoning bylaw",
+    "official plan",
+    "committee of adjustment",
+    "land titles act",
+    "land registry",
+    "expropriation act",
 ]
 
-# Number of PI keywords required to pass through to Claude
-_THRESHOLD = 2
+# Thresholds
+_SUPPORTING_THRESHOLD = 3   # need this many tier-2 keywords if no tier-1
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 
 def prequalify(text: str, title: str = "") -> tuple[bool, str]:
     """
-    Determine whether a case is likely a PI damages matter worth analysing.
+    Determine whether a case is likely a PI damages matter.
 
     Parameters
     ----------
-    text  : Full case text (may be truncated)
-    title : Case title from RSS feed (checked separately for extra signal)
+    text  : Full case text (from PDF)
+    title : Case title from RSS feed
 
     Returns
     -------
-    (True,  reason_string)  → pass to Claude
-    (False, reason_string)  → skip, no API call needed
+    (True,  reason_string)  → send to Claude
+    (False, reason_string)  → skip — no API call
     """
     combined = (title + " " + text).lower()
 
     # ── Hard reject on exclusion keywords ────────────────────────────────────
-    for kw in _EXCLUSION_KEYWORDS:
+    for kw in _EXCLUSION:
         if kw in combined:
-            return False, f"exclusion keyword matched: '{kw}'"
+            return False, f"exclusion keyword: '{kw}'"
 
-    # ── Count PI-positive keywords ────────────────────────────────────────────
-    found = [kw for kw in _PI_KEYWORDS if kw in combined]
+    # ── Tier 1: one high-confidence match = definite pass ────────────────────
+    for kw in _HIGH_CONFIDENCE:
+        if kw in combined:
+            return True, f"high-confidence keyword: '{kw}'"
 
-    if len(found) >= _THRESHOLD:
+    # ── Tier 2: need 3+ supporting keywords ──────────────────────────────────
+    found = [kw for kw in _SUPPORTING if kw in combined]
+    if len(found) >= _SUPPORTING_THRESHOLD:
         preview = ", ".join(f"'{k}'" for k in found[:4])
-        return True, f"{len(found)} PI keyword(s) found: {preview}"
+        return True, f"{len(found)} supporting keywords: {preview}"
 
     return False, (
-        f"only {len(found)} PI keyword(s) found "
-        f"(need {_THRESHOLD}) — likely not a PI damages case"
+        f"no high-confidence keyword; only {len(found)}/{_SUPPORTING_THRESHOLD} "
+        f"supporting keywords — likely not PI"
     )

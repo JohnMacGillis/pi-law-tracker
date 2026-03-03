@@ -67,6 +67,22 @@ _HIGH_CONFIDENCE = [
     "dog owners' liability",
     "dog owners liability",
     "icbc",
+
+    # Common Canadian PI phrasing
+    "motor vehicle",          # civil context covered — criminal caught by exclusions
+    "injuries sustained",
+    "sustained injuries",
+    "plaintiff was injured",
+    "injured in",
+    "loss of enjoyment of life",
+    "loss of amenities",
+    "loss of capacity",
+    "functional limitations",
+    "pain, suffering",
+    "general and special damages",
+    "negligently caused",
+    "the collision",
+    "the accident",           # very common in PI decisions
 ]
 
 # ── Tier 2: SUPPORTING keywords ───────────────────────────────────────────────
@@ -107,23 +123,18 @@ _SUPPORTING = [
 # Covers criminal, family, tax, IP, immigration, labour, etc.
 
 _EXCLUSION = [
-    # Criminal law
+    # Criminal law — only terms that CANNOT appear in a civil PI decision
     "criminal code",
     "the accused",
     "guilty plea",
     "not guilty",
-    "criminal negligence",
+    "criminal negligence causing",  # more specific than plain "criminal negligence"
     "manslaughter",
-    "impaired driving",
-    "dangerous driving",
-    " sentence ",
-    "imprisonment",
-    "probation order",
-    " parole ",
-    "crown counsel",
-    "crown attorney",
     "indictment",
     "criminal conviction",
+    # NOTE: removed " sentence ", "crown counsel", "crown attorney", " parole ",
+    # "impaired driving", "dangerous driving" — these can all appear in civil PI
+    # cases (e.g. plaintiff sues drunk driver; government as defendant).
 
     # Family law
     "divorce act",
@@ -178,7 +189,7 @@ _EXCLUSION = [
 ]
 
 # Thresholds
-_SUPPORTING_THRESHOLD = 3   # need this many tier-2 keywords if no tier-1
+_SUPPORTING_THRESHOLD = 2   # need this many tier-2 keywords if no tier-1
 
 
 # ─────────────────────────────────────────────────────────────────────────────

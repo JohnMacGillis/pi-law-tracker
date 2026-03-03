@@ -34,6 +34,7 @@ from case_fetcher import (
     needs_cookie_refresh, rebuild_session, reset_403_counter,
 )
 from case_analyzer import analyze_case
+from case_prefilter import prequalify
 
 
 # ── Logging setup (file + stdout) ─────────────────────────────────────────────
@@ -128,6 +129,15 @@ def _process_case(case_meta: dict, saved_ref: list, skipped_ref: list,
     if not raw_text:
         errors_ref[0] += 1
         return  # caller handles the 403-threshold check
+
+    # ── Keyword pre-filter (free — no API call) ───────────────────────────────
+    is_candidate, reason = prequalify(raw_text, title)
+    if not is_candidate:
+        logger.info("    Pre-filter: skipped — %s", reason)
+        skipped_ref[0] += 1
+        return
+
+    logger.info("    Pre-filter: passed — %s", reason)
 
     text = smart_truncate(raw_text, MAX_CASE_CHARS)
     logger.info(

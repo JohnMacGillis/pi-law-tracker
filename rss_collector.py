@@ -4,6 +4,8 @@ Fetches CanLII RSS feeds for every monitored court and returns
 cases that have not been processed before.
 """
 
+import html
+import re
 import time
 import logging
 from datetime import datetime
@@ -14,6 +16,13 @@ from config import REQUEST_DELAY_SECONDS
 from courts import COURTS
 
 logger = logging.getLogger(__name__)
+
+
+def _strip_html(text: str) -> str:
+    """Strip HTML tags and decode entities for plain-text keyword matching."""
+    text = re.sub(r"<[^>]+>", " ", text)
+    text = html.unescape(text)
+    return " ".join(text.split())
 
 
 def _parse_date(entry) -> str:
@@ -64,6 +73,16 @@ def fetch_new_cases(seen_ids: set) -> list[dict]:
                 if not case_id or case_id in seen_ids:
                     continue
 
+                # CanLII RSS summaries contain the opening paragraphs of the
+                # decision — enough for a first-pass keyword filter with no
+                # additional HTTP requests.
+                raw_summary = (
+                    entry.get("summary")
+                    or entry.get("description")
+                    or ""
+                )
+                rss_summary = _strip_html(raw_summary)
+
                 new_cases.append(
                     {
                         "case_id":        case_id,
@@ -72,6 +91,7 @@ def fetch_new_cases(seen_ids: set) -> list[dict]:
                         "province":       court["province"],
                         "court_name":     court["name"],
                         "published_date": _parse_date(entry),
+                        "rss_summary":    rss_summary,
                     }
                 )
 

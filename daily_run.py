@@ -68,11 +68,20 @@ def _fetch_one(case_meta: dict) -> tuple[dict, str | None, str | None]:
     """
     title = case_meta["title"]
 
-    # Title filter costs nothing — skip before touching the network
+    # Stage 1 — title filter: instant reject, zero network cost
     title_ok, title_reason = prequalify_title(title)
     if title_ok is False:
         return case_meta, None, f"title: {title_reason}"
 
+    # Stage 2 — RSS summary filter: keyword check on text already in the feed,
+    # no PDF download needed.  Only run if the summary is substantial.
+    rss_summary = case_meta.get("rss_summary", "")
+    if len(rss_summary) > 150:
+        is_candidate, reason = prequalify(rss_summary, title)
+        if not is_candidate:
+            return case_meta, None, f"rss: {reason}"
+
+    # Stage 3 — PDF download: only cases that passed stages 1 & 2
     raw_text = fetch_case_text(case_meta["url"])
     if raw_text is None:
         return case_meta, None, "fetch failed (403 or empty)"
@@ -171,6 +180,11 @@ def run() -> None:
                 if skip_reason and skip_reason.startswith("title:"):
                     logger.info("─── %s\n    Title filter: skipped — %s",
                                 title, skip_reason[7:])
+                    skipped += 1
+
+                elif skip_reason and skip_reason.startswith("rss:"):
+                    logger.info("─── %s\n    RSS filter: skipped — %s",
+                                title, skip_reason[4:])
                     skipped += 1
 
                 elif skip_reason:

@@ -46,8 +46,8 @@ SEEN_IDS_FILE = "data/seen_case_ids.txt"
 LOG_FILE      = "data/tracker.log"
 
 # ── Request Throttle ──────────────────────────────────────────────────────────
-# Seconds to wait between HTTP requests to CanLII. Please keep at 2+.
-REQUEST_DELAY_SECONDS = 2
+# Seconds to wait between HTTP requests to CanLII. Please keep at 5+.
+REQUEST_DELAY_SECONDS = 5
 
 # Seconds to wait between Claude API calls.
 # Free / Tier-1 accounts: keep at 15+  (rate limit: ~5-50 req/min)

@@ -16,6 +16,7 @@ import json
 import logging
 import os
 import random
+import threading
 import time
 
 import fitz                           # PyMuPDF
@@ -24,6 +25,11 @@ from curl_cffi import requests        # Chrome TLS fingerprint
 from config import REQUEST_DELAY_SECONDS
 
 logger = logging.getLogger(__name__)
+
+# Thread-safe rate limiter — ensures requests to CanLII are always spaced
+# at least REQUEST_DELAY_SECONDS apart, even with parallel workers.
+_request_lock       = threading.Lock()
+_last_request_time  = 0.0
 
 # ── Cookie file ───────────────────────────────────────────────────────────────
 COOKIE_FILE = "canlii_cookies.json"
@@ -115,8 +121,19 @@ def reset_403_counter() -> None:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _pause() -> None:
-    """Polite random delay between requests."""
-    time.sleep(random.uniform(REQUEST_DELAY_SECONDS, REQUEST_DELAY_SECONDS + 5.0))
+    """
+    Thread-safe rate limiter.  Acquires a lock before sleeping so that
+    parallel workers never fire requests simultaneously — CanLII sees at
+    most one request every REQUEST_DELAY_SECONDS seconds.
+    """
+    global _last_request_time
+    with _request_lock:
+        elapsed = time.time() - _last_request_time
+        gap     = random.uniform(REQUEST_DELAY_SECONDS, REQUEST_DELAY_SECONDS + 5.0)
+        wait    = max(0.0, gap - elapsed)
+        if wait > 0:
+            time.sleep(wait)
+        _last_request_time = time.time()
 
 
 def _case_url_to_pdf_url(url: str) -> str:
@@ -148,6 +165,13 @@ def fetch_case_text(url: str) -> str | None:
 
     try:
         resp = _get_session().get(pdf_url, timeout=60)
+
+        if resp.status_code == 429:
+            retry_after = int(resp.headers.get("Retry-After", 60))
+            logger.warning("    429 from CanLII — waiting %ds then retrying …", retry_after)
+            time.sleep(retry_after)
+            _pause()
+            resp = _get_session().get(pdf_url, timeout=60)
 
         if resp.status_code == 403:
             _consecutive_403s += 1

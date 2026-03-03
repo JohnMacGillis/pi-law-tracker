@@ -49,8 +49,8 @@ logging.basicConfig(
 )
 logger = logging.getLogger("daily_run")
 
-# Parallel PDF workers — 3 is safe for CanLII; don't exceed 5
-FETCH_WORKERS = 3
+# Parallel PDF workers — 2 balances speed vs. CanLII rate limits
+FETCH_WORKERS = 2
 
 
 # ── Phase 1 worker ────────────────────────────────────────────────────────────

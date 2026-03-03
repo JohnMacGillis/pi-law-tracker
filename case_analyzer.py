@@ -121,6 +121,26 @@ def analyze_case(text: str, title: str, court: str = "", province: str = "") -> 
     except json.JSONDecodeError as exc:
         logger.error("JSON parse error for '%s': %s  |  raw=%s", title, exc, raw[:200])
         return None
+    except anthropic.RateLimitError:
+        # SDK retries (max_retries=6) were all exhausted — wait 90s and try once more
+        logger.warning("    Rate limit exhausted for '%s' — waiting 90s then retrying …", title)
+        time.sleep(90)
+        _last_call_time = 0.0   # force full delay gap on the next case too
+        try:
+            message = _client.messages.create(
+                model=CLAUDE_MODEL,
+                max_tokens=1024,
+                system=_SYSTEM,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            raw    = message.content[0].text.strip()
+            result = json.loads(raw)
+            result.setdefault("damages", {})
+            _last_call_time = time.time()
+            return result
+        except Exception as retry_exc:
+            logger.error("    Retry also failed for '%s': %s", title, retry_exc)
+            return None
     except anthropic.APIError as exc:
         logger.error("Anthropic API error for '%s': %s", title, exc)
         return None

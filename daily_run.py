@@ -1,29 +1,27 @@
 """
 daily_run.py
-Scheduled daily job — run this every morning via Windows Task Scheduler.
+Scheduled daily job — run every morning via Windows Task Scheduler.
 
-Pipeline for each new CanLII case:
-  1. Fetch RSS feeds from all monitored courts
-  2. Skip cases already in seen_case_ids.txt
-  3. Fetch full case text from CanLII (PDF via curl_cffi + DataDome cookie)
-  4. Send to Claude for PI relevance check + damage extraction
-  5. If relevant, save to cases.csv
+Two-phase pipeline:
+  Phase 1 — Parallel PDF fetch (FETCH_WORKERS concurrent connections)
+             Title pre-filter runs before each download to skip obvious
+             non-PI cases without touching the network at all.
+  Phase 2 — Sequential pre-filter + Claude analysis on surviving cases
+             Claude calls are rate-limited with an adaptive delay.
 
 Cookie refresh:
-  If CanLII starts returning 403 errors (DataDome cookie expired), the script
-  automatically launches refresh_cookies.py — a Chrome window opens, you solve
-  the slider (if prompted), click OK, and the run resumes where it left off.
-  Cases that couldn't be fetched before the refresh are un-marked so they will
-  be retried the following day (they stay in the RSS feed for several weeks).
+  If CanLII returns 3+ consecutive 403s, refresh_cookies.py is launched
+  automatically. Failed cases are un-marked so tomorrow's run retries them.
 """
 
 import logging
 import os
 import subprocess
 import sys
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 
-# Ensure the script can be run from any working directory
+# Run from the script's own directory regardless of how Task Scheduler calls it
 os.chdir(os.path.dirname(os.path.abspath(__file__)))
 
 from config import DATA_DIR, LOG_FILE, MAX_CASE_CHARS
@@ -37,7 +35,7 @@ from case_analyzer import analyze_case
 from case_prefilter import prequalify, prequalify_title
 
 
-# ── Logging setup (file + stdout) ─────────────────────────────────────────────
+# ── Logging ───────────────────────────────────────────────────────────────────
 os.makedirs(DATA_DIR, exist_ok=True)
 
 logging.basicConfig(
@@ -51,133 +49,78 @@ logging.basicConfig(
 )
 logger = logging.getLogger("daily_run")
 
+# Parallel PDF workers — 3 is safe for CanLII; don't exceed 5
+FETCH_WORKERS = 3
 
-# ── Cookie refresh helper ──────────────────────────────────────────────────────
+
+# ── Phase 1 worker ────────────────────────────────────────────────────────────
+
+def _fetch_one(case_meta: dict) -> tuple[dict, str | None, str | None]:
+    """
+    Title filter + PDF download for one case.
+    Runs in a thread-pool worker.
+
+    Returns
+    -------
+    (case_meta, raw_text, skip_reason)
+      raw_text    — PDF text if successful, else None
+      skip_reason — human-readable reason if skipped/failed, else None
+    """
+    title = case_meta["title"]
+
+    # Title filter costs nothing — skip before touching the network
+    title_ok, title_reason = prequalify_title(title)
+    if title_ok is False:
+        return case_meta, None, f"title: {title_reason}"
+
+    raw_text = fetch_case_text(case_meta["url"])
+    if raw_text is None:
+        return case_meta, None, "fetch failed (403 or empty)"
+
+    return case_meta, raw_text, None
+
+
+# ── Cookie refresh helper ─────────────────────────────────────────────────────
 
 def _trigger_cookie_refresh() -> bool:
-    """
-    Launch refresh_cookies.py as a subprocess and wait for it to finish.
-
-    This opens a Chrome window so the user can solve any DataDome slider.
-    Returns True if the cookies were saved successfully.
-    """
     logger.warning("=" * 65)
-    logger.warning("COOKIE REFRESH TRIGGERED — opening Chrome to CanLII")
-    logger.warning("A browser window will appear. Solve the slider if prompted,")
-    logger.warning("then click OK. The daily run will resume automatically.")
+    logger.warning("COOKIE REFRESH — opening Chrome to CanLII")
+    logger.warning("Solve the slider if prompted, then click OK.")
     logger.warning("=" * 65)
-
     try:
         result = subprocess.run(
             [sys.executable, "refresh_cookies.py"],
-            timeout=300,   # 5-minute window for user to act
+            timeout=300,
         )
         if result.returncode == 0:
             logger.info("Cookie refresh completed successfully.")
             return True
-        else:
-            logger.error("refresh_cookies.py exited with code %d", result.returncode)
-            return False
-    except subprocess.TimeoutExpired:
-        logger.error("Cookie refresh timed out (5 min). Run refresh_cookies.py manually.")
+        logger.error("refresh_cookies.py exited with code %d", result.returncode)
         return False
-    except FileNotFoundError:
-        logger.error("refresh_cookies.py not found in the script directory.")
+    except subprocess.TimeoutExpired:
+        logger.error("Cookie refresh timed out (5 min).")
         return False
     except Exception as exc:
-        logger.error("Cookie refresh failed: %s", exc)
+        logger.error("Cookie refresh error: %s", exc)
         return False
 
 
-def _send_cookie_alert(email_enabled: bool = True) -> None:
-    """Send an email alert if cookies need refreshing (best-effort)."""
-    if not email_enabled:
-        return
+def _send_cookie_alert() -> None:
     try:
-        # Import lazily so a SendGrid misconfiguration doesn't crash the run
         from email_report import send_alert_email
         send_alert_email(
             subject="⚠️  PI Law Tracker — Cookie Refresh Required",
             body=(
-                "<p>The PI Law Tracker encountered multiple 403 errors from CanLII, "
-                "which means the DataDome session cookie has expired.</p>"
-                "<p><strong>Action required:</strong> On the Windows computer, "
-                "double-click <em>REFRESH COOKIES.bat</em> on the Desktop, "
-                "solve the slider if it appears, and click OK.</p>"
-                "<p>Cases that could not be fetched today have been un-marked "
-                "and will be retried in tomorrow's run.</p>"
+                "<p>The tracker encountered multiple 403 errors from CanLII "
+                "(DataDome cookie expired).</p>"
+                "<p><strong>Action:</strong> Double-click "
+                "<em>REFRESH COOKIES.bat</em> on the Desktop, solve the slider "
+                "if it appears, then click OK.</p>"
+                "<p>Missed cases have been un-marked and will retry tomorrow.</p>"
             ),
         )
-        logger.info("Cookie-refresh alert email sent.")
     except Exception as exc:
         logger.warning("Could not send alert email: %s", exc)
-
-
-# ── Case processing helper ─────────────────────────────────────────────────────
-
-def _process_case(case_meta: dict, saved_ref: list, skipped_ref: list,
-                  errors_ref: list) -> None:
-    """
-    Fetch, analyse, and save one case.  Updates the mutable counter lists
-    in-place (avoids needing nonlocal in the caller).
-    """
-    title = case_meta["title"]
-    logger.info("─── %s", title)
-
-    # ── Title pre-filter (free — no download needed) ──────────────────────────
-    title_ok, title_reason = prequalify_title(title)
-    if title_ok is False:
-        logger.info("    Title filter: skipped — %s", title_reason)
-        skipped_ref[0] += 1
-        return
-
-    # ── Fetch full text ───────────────────────────────────────────────────────
-    raw_text = fetch_case_text(case_meta["url"])
-    if not raw_text:
-        errors_ref[0] += 1
-        return  # caller handles the 403-threshold check
-
-    # ── Full-text pre-filter (free — no API call) ─────────────────────────────
-    is_candidate, reason = prequalify(raw_text, title)
-    if not is_candidate:
-        logger.info("    Pre-filter: skipped — %s", reason)
-        skipped_ref[0] += 1
-        return
-
-    logger.info("    Pre-filter: passed — %s", reason)
-
-    text = smart_truncate(raw_text, MAX_CASE_CHARS)
-    logger.info(
-        "    Text: %d chars (raw) → %d chars (sent to Claude)",
-        len(raw_text), len(text),
-    )
-
-    # ── Analyse with Claude ───────────────────────────────────────────────────
-    analysis = analyze_case(
-        text=text,
-        title=title,
-        court=case_meta.get("court_name", ""),
-        province=case_meta.get("province", ""),
-    )
-
-    if analysis is None:
-        logger.warning("    Analysis failed — skipping")
-        errors_ref[0] += 1
-        return
-
-    if not analysis.get("is_relevant"):
-        logger.info("    Not a PI damages case — skipping")
-        skipped_ref[0] += 1
-        return
-
-    # ── Save ──────────────────────────────────────────────────────────────────
-    save_case(case_meta, analysis)
-    saved_ref[0] += 1
-    logger.info(
-        "    SAVED — type: %s | total: %s",
-        analysis.get("case_type", "?"),
-        (analysis.get("damages") or {}).get("total") or "N/A",
-    )
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
@@ -189,9 +132,8 @@ def run() -> None:
 
     ensure_data_dir()
     seen_ids = load_seen_ids()
-    logger.info("Known case IDs loaded: %d", len(seen_ids))
+    logger.info("Known case IDs: %d", len(seen_ids))
 
-    # ── Step 1: Discover new cases via RSS ────────────────────────────────────
     new_cases = fetch_new_cases(seen_ids)
     logger.info("New cases to evaluate: %d", len(new_cases))
 
@@ -200,70 +142,112 @@ def run() -> None:
         logger.info("=" * 65)
         return
 
-    # Mutable counters passed by reference into _process_case
-    saved   = [0]
-    skipped = [0]
-    errors  = [0]
-
-    # Track which cases were marked-seen but couldn't be fetched (403 etc.)
-    # so we can un-mark them if a cookie refresh succeeds.
-    fetch_failed_ids: set[str] = set()
-    cookie_refresh_done = False
-
-    # ── Step 2-4: Process each case ───────────────────────────────────────────
+    # Mark all as seen immediately for crash safety.
+    # Cases that 403 are un-marked at the end so tomorrow retries them.
     for case_meta in new_cases:
-        case_id = case_meta["case_id"]
+        mark_seen(case_meta["case_id"])
 
-        # Mark seen immediately — prevents double-processing if we crash.
-        # Cases that 403 will be un-marked at the end so they retry tomorrow.
-        mark_seen(case_id)
+    saved   = 0
+    skipped = 0
+    errors  = 0
+    fetch_failed_ids: set[str] = set()
 
-        prev_errors = errors[0]
-        _process_case(case_meta, saved, skipped, errors)
-        fetch_failed = (errors[0] > prev_errors)
+    # ── Phase 1: Parallel PDF fetch ───────────────────────────────────────────
+    logger.info(
+        "Phase 1: fetching up to %d PDFs with %d parallel workers …",
+        len(new_cases), FETCH_WORKERS,
+    )
 
-        if fetch_failed:
-            fetch_failed_ids.add(case_id)
+    fetch_results: list[tuple[dict, str | None, str | None]] = []
 
-        # ── Cookie refresh check ──────────────────────────────────────────────
-        if needs_cookie_refresh() and not cookie_refresh_done:
-            logger.warning(
-                "3 consecutive 403s — triggering cookie refresh "
-                "(%d cases in retry queue)", len(fetch_failed_ids),
-            )
+    with ThreadPoolExecutor(max_workers=FETCH_WORKERS) as pool:
+        future_map = {pool.submit(_fetch_one, c): c for c in new_cases}
 
-            # Try to send an email alert (non-blocking best-effort)
-            _send_cookie_alert()
+        for future in as_completed(future_map):
+            try:
+                case_meta, raw_text, skip_reason = future.result()
+                title = case_meta["title"]
 
-            # Launch the browser window for the user to solve the slider
-            refresh_ok = _trigger_cookie_refresh()
+                if skip_reason and skip_reason.startswith("title:"):
+                    logger.info("─── %s\n    Title filter: skipped — %s",
+                                title, skip_reason[7:])
+                    skipped += 1
 
-            if refresh_ok:
-                cookie_refresh_done = True
-                rebuild_session()
-                reset_403_counter()
+                elif skip_reason:
+                    logger.warning("─── %s\n    %s", title, skip_reason)
+                    fetch_failed_ids.add(case_meta["case_id"])
+                    errors += 1
 
-                # Un-mark the 403'd cases so tomorrow's run picks them up
-                unmark_seen(fetch_failed_ids)
-                logger.info(
-                    "Cookies refreshed. %d cases un-marked for tomorrow's retry.",
-                    len(fetch_failed_ids),
-                )
-                fetch_failed_ids.clear()
-            else:
-                # Refresh failed — no point continuing, everything will 403
-                logger.error(
-                    "Cookie refresh failed. Stopping run early. "
-                    "Run  python refresh_cookies.py  manually, then re-run."
-                )
-                # Un-mark failed cases so they're retried when cookies work again
-                unmark_seen(fetch_failed_ids)
-                break
+                else:
+                    logger.info("─── %s\n    PDF: %d chars",
+                                title, len(raw_text))
+                    fetch_results.append((case_meta, raw_text))
+
+            except Exception as exc:
+                logger.error("Unexpected fetch error: %s", exc)
+                errors += 1
+
+    # Cookie refresh check after all fetches
+    if needs_cookie_refresh():
+        _send_cookie_alert()
+        if _trigger_cookie_refresh():
+            rebuild_session()
+            reset_403_counter()
+        unmark_seen(fetch_failed_ids)
+        logger.info(
+            "%d fetch-failed cases un-marked for tomorrow's retry.",
+            len(fetch_failed_ids),
+        )
+        fetch_failed_ids.clear()
+
+    # ── Phase 2: Sequential pre-filter + Claude analysis ─────────────────────
+    logger.info(
+        "Phase 2: analysing %d fetched cases …", len(fetch_results)
+    )
+
+    for case_meta, raw_text in fetch_results:
+        title = case_meta["title"]
+
+        # Full-text keyword filter — free, no API call
+        is_candidate, reason = prequalify(raw_text, title)
+        if not is_candidate:
+            logger.info("    [%s] Pre-filter: skipped — %s", title, reason)
+            skipped += 1
+            continue
+
+        logger.info("    [%s] Pre-filter: passed — %s", title, reason)
+
+        text     = smart_truncate(raw_text, MAX_CASE_CHARS)
+        analysis = analyze_case(
+            text=text,
+            title=title,
+            court=case_meta.get("court_name", ""),
+            province=case_meta.get("province", ""),
+        )
+
+        if analysis is None:
+            logger.warning("    [%s] Analysis failed — skipping", title)
+            errors += 1
+            continue
+
+        if not analysis.get("is_relevant"):
+            logger.info("    [%s] Not PI — skipping", title)
+            skipped += 1
+            continue
+
+        save_case(case_meta, analysis)
+        saved += 1
+        logger.info(
+            "    [%s] SAVED — %s | total: %s",
+            title,
+            analysis.get("case_type", "?"),
+            (analysis.get("damages") or {}).get("total") or "N/A",
+        )
 
     elapsed = (datetime.now() - start).seconds
     logger.info(
         "Run complete in %ds — saved: %d | skipped: %d | errors: %d",
-        elapsed, saved[0], skipped[0], errors[0],
+        elapsed, saved, skipped, errors,
     )
     logger.info("=" * 65)
 

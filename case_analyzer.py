@@ -11,14 +11,17 @@ Response is always JSON so it can be stored directly in the CSV.
 
 import json
 import logging
+import time
 
 import anthropic
 
-from config import ANTHROPIC_API_KEY, CLAUDE_MODEL
+from config import ANTHROPIC_API_KEY, CLAUDE_MODEL, CLAUDE_DELAY_SECONDS
 
 logger = logging.getLogger(__name__)
 
-_client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+# max_retries=6 means the SDK will wait and retry automatically on 429s
+# using exponential backoff (2s, 4s, 8s … up to ~64s between attempts)
+_client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY, max_retries=6)
 
 # ── Prompts ───────────────────────────────────────────────────────────────────
 
@@ -77,6 +80,9 @@ def analyze_case(text: str, title: str, court: str = "", province: str = "") -> 
         province=province,
         text=text,
     )
+
+    # Polite delay to stay inside Claude API rate limits
+    time.sleep(CLAUDE_DELAY_SECONDS)
 
     try:
         message = _client.messages.create(

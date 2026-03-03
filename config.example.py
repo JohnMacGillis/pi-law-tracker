@@ -48,3 +48,8 @@ LOG_FILE      = "data/tracker.log"
 # ── Request Throttle ──────────────────────────────────────────────────────────
 # Seconds to wait between HTTP requests to CanLII. Please keep at 2+.
 REQUEST_DELAY_SECONDS = 2
+
+# Seconds to wait between Claude API calls.
+# Free / Tier-1 accounts: keep at 15+  (rate limit: ~5-50 req/min)
+# Tier-2+ accounts: can lower to 3-5
+CLAUDE_DELAY_SECONDS = 15

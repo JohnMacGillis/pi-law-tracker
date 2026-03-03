@@ -182,6 +182,57 @@ _SUPPORTING_THRESHOLD = 3   # need this many tier-2 keywords if no tier-1
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Title-only quick excludes — checked BEFORE downloading the PDF
+# ─────────────────────────────────────────────────────────────────────────────
+
+_TITLE_EXCLUDES = [
+    "r. v. ",          # Criminal — most common CanLII pattern
+    " r v ",           # Criminal alternate
+    "r. v ",
+    "regina v. ",
+    "the king v. ",
+    "the queen v. ",
+    "his majesty v. ",
+    "her majesty v. ",
+    " divorce",
+    "child custody",
+    "child support",
+    "spousal support",
+    "parenting order",
+    "protection order",
+    "restraining order",
+    "adoption of",
+    "bankruptcy of",
+    "in the matter of the bankruptcy",
+    "income tax appeal",
+    "tax court",
+    "immigration appeal",
+    "refugee appeal",
+    "labour arbitration",
+    "grievance of",
+    "judicial review of",
+    "certiorari",
+    "habeas corpus",
+]
+
+
+def prequalify_title(title: str) -> tuple[bool | None, str]:
+    """
+    Fast title-only check run BEFORE downloading the PDF.
+
+    Returns
+    -------
+    (False, reason) → definitely not PI — skip, no download needed
+    (None,  reason) → unclear from title alone — download PDF and run full check
+    """
+    t = title.lower()
+
+    for kw in _TITLE_EXCLUDES:
+        if kw in t:
+            return False, f"title keyword: '{kw.strip()}'"
+
+    return None, "title unclear — downloading PDF for full check"
+
 
 def prequalify(text: str, title: str = "") -> tuple[bool, str]:
     """

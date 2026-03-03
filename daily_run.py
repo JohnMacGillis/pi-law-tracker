@@ -34,7 +34,7 @@ from case_fetcher import (
     needs_cookie_refresh, rebuild_session, reset_403_counter,
 )
 from case_analyzer import analyze_case
-from case_prefilter import prequalify
+from case_prefilter import prequalify, prequalify_title
 
 
 # ── Logging setup (file + stdout) ─────────────────────────────────────────────
@@ -124,13 +124,20 @@ def _process_case(case_meta: dict, saved_ref: list, skipped_ref: list,
     title = case_meta["title"]
     logger.info("─── %s", title)
 
+    # ── Title pre-filter (free — no download needed) ──────────────────────────
+    title_ok, title_reason = prequalify_title(title)
+    if title_ok is False:
+        logger.info("    Title filter: skipped — %s", title_reason)
+        skipped_ref[0] += 1
+        return
+
     # ── Fetch full text ───────────────────────────────────────────────────────
     raw_text = fetch_case_text(case_meta["url"])
     if not raw_text:
         errors_ref[0] += 1
         return  # caller handles the 403-threshold check
 
-    # ── Keyword pre-filter (free — no API call) ───────────────────────────────
+    # ── Full-text pre-filter (free — no API call) ─────────────────────────────
     is_candidate, reason = prequalify(raw_text, title)
     if not is_candidate:
         logger.info("    Pre-filter: skipped — %s", reason)

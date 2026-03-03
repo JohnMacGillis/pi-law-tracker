@@ -23,6 +23,10 @@ logger = logging.getLogger(__name__)
 # using exponential backoff (2s, 4s, 8s … up to ~64s between attempts)
 _client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY, max_retries=6)
 
+# Tracks when we last called the API so we only sleep the *remaining* gap,
+# not the full CLAUDE_DELAY_SECONDS every time.
+_last_call_time: float = 0.0
+
 # ── Prompts ───────────────────────────────────────────────────────────────────
 
 _SYSTEM = """You are a legal research assistant for a Canadian personal injury law firm.
@@ -81,8 +85,16 @@ def analyze_case(text: str, title: str, court: str = "", province: str = "") -> 
         text=text,
     )
 
-    # Polite delay to stay inside Claude API rate limits
-    time.sleep(CLAUDE_DELAY_SECONDS)
+    # Adaptive delay — only sleep however much time is still needed since the
+    # last API call.  PDF fetch + pre-filter already burned several seconds,
+    # so this is often zero or just a few seconds.
+    global _last_call_time
+    elapsed = time.time() - _last_call_time
+    wait    = max(0.0, CLAUDE_DELAY_SECONDS - elapsed)
+    if wait > 0.5:
+        logger.info("    Rate-limit pause: %.1fs", wait)
+        time.sleep(wait)
+    _last_call_time = time.time()
 
     try:
         message = _client.messages.create(

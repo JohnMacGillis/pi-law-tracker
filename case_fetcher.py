@@ -120,16 +120,35 @@ def reset_403_counter() -> None:
 # Fetching
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _human_gap() -> float:
+    """
+    Return a delay that mimics natural human browsing behaviour.
+
+    Distribution (right-skewed, like real click patterns):
+      70%  —  short pause      REQUEST_DELAY to +7 s   (normal reading)
+      20%  —  medium pause    15–35 s                  (slight distraction)
+      10%  —  long pause      40–90 s                  (coffee, phone call)
+
+    Uniform mechanical delays are a strong bot signal. Variance is key.
+    """
+    roll = random.random()
+    if roll < 0.70:
+        return random.uniform(REQUEST_DELAY_SECONDS, REQUEST_DELAY_SECONDS + 7)
+    elif roll < 0.90:
+        return random.uniform(15, 35)
+    else:
+        return random.uniform(40, 90)
+
+
 def _pause() -> None:
     """
-    Thread-safe rate limiter.  Acquires a lock before sleeping so that
-    parallel workers never fire requests simultaneously — CanLII sees at
-    most one request every REQUEST_DELAY_SECONDS seconds.
+    Thread-safe rate limiter.  Acquires a lock so parallel workers never
+    fire requests simultaneously, then waits a human-like random gap.
     """
     global _last_request_time
     with _request_lock:
         elapsed = time.time() - _last_request_time
-        gap     = random.uniform(REQUEST_DELAY_SECONDS, REQUEST_DELAY_SECONDS + 5.0)
+        gap     = _human_gap()
         wait    = max(0.0, gap - elapsed)
         if wait > 0:
             time.sleep(wait)

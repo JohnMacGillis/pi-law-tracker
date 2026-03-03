@@ -2,11 +2,12 @@
 daily_run.py
 Scheduled daily job — run every morning via Windows Task Scheduler.
 
-Two-phase pipeline:
+Three-phase pipeline:
+  Phase 0 — Instant pre-filter: title + RSS-summary keyword checks on ALL cases.
+             No network I/O — eliminates the bulk of non-PI cases for free.
   Phase 1 — Parallel PDF fetch (FETCH_WORKERS concurrent connections)
-             Title pre-filter runs before each download to skip obvious
-             non-PI cases without touching the network at all.
-  Phase 2 — Sequential pre-filter + Claude analysis on surviving cases
+             Only the cases that survived Phase 0.
+  Phase 2 — Full-text pre-filter + Claude analysis on surviving cases.
              Claude calls are rate-limited with an adaptive delay.
 
 Cookie refresh:
@@ -53,43 +54,7 @@ logger = logging.getLogger("daily_run")
 FETCH_WORKERS = 2
 
 
-# ── Phase 1 worker ────────────────────────────────────────────────────────────
-
-def _fetch_one(case_meta: dict) -> tuple[dict, str | None, str | None]:
-    """
-    Title filter + PDF download for one case.
-    Runs in a thread-pool worker.
-
-    Returns
-    -------
-    (case_meta, raw_text, skip_reason)
-      raw_text    — PDF text if successful, else None
-      skip_reason — human-readable reason if skipped/failed, else None
-    """
-    title = case_meta["title"]
-
-    # Stage 1 — title filter: instant reject, zero network cost
-    title_ok, title_reason = prequalify_title(title)
-    if title_ok is False:
-        return case_meta, None, f"title: {title_reason}"
-
-    # Stage 2 — RSS summary filter: keyword check on text already in the feed,
-    # no PDF download needed.  Only run if the summary is substantial.
-    rss_summary = case_meta.get("rss_summary", "")
-    if len(rss_summary) > 150:
-        is_candidate, reason = prequalify(rss_summary, title)
-        if not is_candidate:
-            return case_meta, None, f"rss: {reason}"
-
-    # Stage 3 — PDF download: only cases that passed stages 1 & 2
-    raw_text = fetch_case_text(case_meta["url"])
-    if raw_text is None:
-        return case_meta, None, "fetch failed (403 or empty)"
-
-    return case_meta, raw_text, None
-
-
-# ── Cookie refresh helper ─────────────────────────────────────────────────────
+# ── Cookie refresh helpers ────────────────────────────────────────────────────
 
 def _trigger_cookie_refresh() -> bool:
     logger.warning("=" * 65)
@@ -161,44 +126,68 @@ def run() -> None:
     errors  = 0
     fetch_failed_ids: set[str] = set()
 
-    # ── Phase 1: Parallel PDF fetch ───────────────────────────────────────────
+    # ── Phase 0: Instant pre-filter (title + RSS summary) ─────────────────────
+    # No network I/O — runs on all cases before any PDF is downloaded.
+    logger.info("Phase 0: pre-filtering %d cases by title + RSS summary …", len(new_cases))
+
+    candidates: list[dict] = []
+
+    for case_meta in new_cases:
+        title = case_meta["title"]
+
+        # Title check — fastest possible reject (criminal, family, etc.)
+        title_ok, title_reason = prequalify_title(title)
+        if title_ok is False:
+            logger.info("─── %s\n    Title: skipped — %s", title, title_reason)
+            skipped += 1
+            continue
+
+        # RSS summary check — keyword scan on text already in the feed
+        rss_summary = case_meta.get("rss_summary", "")
+        if len(rss_summary) > 150:
+            is_candidate, reason = prequalify(rss_summary, title)
+            if not is_candidate:
+                logger.info("─── %s\n    RSS: skipped — %s", title, reason)
+                skipped += 1
+                continue
+
+        candidates.append(case_meta)
+
     logger.info(
-        "Phase 1: fetching up to %d PDFs with %d parallel workers …",
-        len(new_cases), FETCH_WORKERS,
+        "Phase 0 complete: %d/%d proceed to PDF download (%d skipped instantly)",
+        len(candidates), len(new_cases), skipped,
     )
 
-    fetch_results: list[tuple[dict, str | None, str | None]] = []
+    if not candidates:
+        logger.info("No candidates after pre-filter. Run complete.")
+        logger.info("=" * 65)
+        return
+
+    # ── Phase 1: Parallel PDF fetch (candidates only) ─────────────────────────
+    logger.info(
+        "Phase 1: fetching %d PDFs with %d parallel workers …",
+        len(candidates), FETCH_WORKERS,
+    )
+
+    fetch_results: list[tuple[dict, str]] = []
 
     with ThreadPoolExecutor(max_workers=FETCH_WORKERS) as pool:
-        future_map = {pool.submit(_fetch_one, c): c for c in new_cases}
+        future_map = {pool.submit(fetch_case_text, c["url"]): c for c in candidates}
 
         for future in as_completed(future_map):
+            case_meta = future_map[future]
+            title = case_meta["title"]
             try:
-                case_meta, raw_text, skip_reason = future.result()
-                title = case_meta["title"]
-
-                if skip_reason and skip_reason.startswith("title:"):
-                    logger.info("─── %s\n    Title filter: skipped — %s",
-                                title, skip_reason[7:])
-                    skipped += 1
-
-                elif skip_reason and skip_reason.startswith("rss:"):
-                    logger.info("─── %s\n    RSS filter: skipped — %s",
-                                title, skip_reason[4:])
-                    skipped += 1
-
-                elif skip_reason:
-                    logger.warning("─── %s\n    %s", title, skip_reason)
+                raw_text = future.result()
+                if raw_text is None:
+                    logger.warning("─── %s\n    fetch failed (403 or empty)", title)
                     fetch_failed_ids.add(case_meta["case_id"])
                     errors += 1
-
                 else:
-                    logger.info("─── %s\n    PDF: %d chars",
-                                title, len(raw_text))
+                    logger.info("─── %s\n    PDF: %d chars", title, len(raw_text))
                     fetch_results.append((case_meta, raw_text))
-
             except Exception as exc:
-                logger.error("Unexpected fetch error: %s", exc)
+                logger.error("Unexpected fetch error for '%s': %s", title, exc)
                 errors += 1
 
     # Cookie refresh check after all fetches
@@ -214,7 +203,7 @@ def run() -> None:
         )
         fetch_failed_ids.clear()
 
-    # ── Phase 2: Sequential pre-filter + Claude analysis ─────────────────────
+    # ── Phase 2: Full-text pre-filter + Claude analysis ───────────────────────
     logger.info(
         "Phase 2: analysing %d fetched cases …", len(fetch_results)
     )

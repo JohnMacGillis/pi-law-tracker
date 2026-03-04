@@ -307,30 +307,45 @@ def run() -> None:
     # Close the browser and persist the session for tomorrow's run
     close_browser()
 
-    # ── Error summary alert ────────────────────────────────────────────────
-    if errors > 0:
-        _send_run_summary_alert(saved, skipped, errors, elapsed)
+    # ── Daily status email ──────────────────────────────────────────────────
+    _send_daily_status(saved, skipped, errors, elapsed)
 
 
 # ── Failure notification helpers ─────────────────────────────────────────────
 
-def _send_run_summary_alert(saved: int, skipped: int, errors: int,
-                            elapsed: int) -> None:
-    """Send a brief email when the daily run finishes with errors."""
+def _send_daily_status(saved: int, skipped: int, errors: int,
+                       elapsed: int) -> None:
+    """Send a status email after every daily run — success or not."""
     try:
         from email_report import send_alert_email
-        send_alert_email(
-            subject=f"PI Law Tracker — {errors} error(s) in daily run",
-            body=(
+
+        if errors > 0:
+            subject = f"PI Law Tracker — {errors} error(s) in daily run"
+            body = (
                 f"<p>The daily run finished in {elapsed}s with "
                 f"<strong>{errors} error(s)</strong>.</p>"
                 f"<p>Saved: {saved} &nbsp;|&nbsp; Skipped: {skipped} "
                 f"&nbsp;|&nbsp; Errors: {errors}</p>"
                 f"<p>Check the log file for details.</p>"
-            ),
-        )
+            )
+        elif saved > 0:
+            subject = f"PI Law Tracker — {saved} new case(s) saved"
+            body = (
+                f"<p>Daily run completed in {elapsed}s.</p>"
+                f"<p>Saved: <strong>{saved}</strong> &nbsp;|&nbsp; "
+                f"Skipped: {skipped} &nbsp;|&nbsp; Errors: 0</p>"
+            )
+        else:
+            subject = "PI Law Tracker — daily run OK, nothing new"
+            body = (
+                f"<p>Daily run completed in {elapsed}s. "
+                f"No new PI cases today.</p>"
+                f"<p>Evaluated: {skipped} &nbsp;|&nbsp; Errors: 0</p>"
+            )
+
+        send_alert_email(subject=subject, body=body)
     except Exception as exc:
-        logger.warning("Could not send run-summary alert: %s", exc)
+        logger.warning("Could not send daily status email: %s", exc)
 
 
 def _send_crash_alert(error: Exception) -> None:

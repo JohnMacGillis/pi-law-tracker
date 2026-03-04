@@ -27,66 +27,84 @@ from config import REQUEST_DELAY_SECONDS, DATA_DIR
 
 logger = logging.getLogger(__name__)
 
-# ── Device profiles — rotated each run to look like different users ───────────
-# Each profile is (user_agent, viewport_width, viewport_height, timezone)
+# ── Device profiles — rotated per fetch to simulate different users ───────────
+# Each profile is (user_agent, viewport_width, viewport_height)
 _DEVICE_PROFILES = [
     # Windows 10/11 — Chrome 122, 1080p
     (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
         "AppleWebKit/537.36 (KHTML, like Gecko) "
         "Chrome/122.0.0.0 Safari/537.36",
-        1920, 1080, "America/Halifax",
+        1920, 1080,
     ),
     # Windows 10/11 — Chrome 124, 1440p
     (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
         "AppleWebKit/537.36 (KHTML, like Gecko) "
         "Chrome/124.0.0.0 Safari/537.36",
-        2560, 1440, "America/Toronto",
+        2560, 1440,
     ),
     # Windows 10/11 — Chrome 120, 1366×768 (very common laptop size)
     (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
         "AppleWebKit/537.36 (KHTML, like Gecko) "
         "Chrome/120.0.0.0 Safari/537.36",
-        1366, 768, "America/Halifax",
+        1366, 768,
     ),
     # Windows 10/11 — Chrome 126, 1536×864
     (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
         "AppleWebKit/537.36 (KHTML, like Gecko) "
         "Chrome/126.0.0.0 Safari/537.36",
-        1536, 864, "America/Moncton",
+        1536, 864,
     ),
     # macOS — Chrome 123, 1440×900 (MacBook Pro 15")
     (
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
         "AppleWebKit/537.36 (KHTML, like Gecko) "
         "Chrome/123.0.0.0 Safari/537.36",
-        1440, 900, "America/Toronto",
+        1440, 900,
     ),
     # macOS — Chrome 125, 1920×1080 (external monitor)
     (
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
         "AppleWebKit/537.36 (KHTML, like Gecko) "
         "Chrome/125.0.0.0 Safari/537.36",
-        1920, 1080, "America/Halifax",
+        1920, 1080,
     ),
     # macOS — Chrome 121, 2560×1600 (MacBook Pro 16" Retina)
     (
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
         "AppleWebKit/537.36 (KHTML, like Gecko) "
         "Chrome/121.0.0.0 Safari/537.36",
-        2560, 1600, "America/Halifax",
+        2560, 1600,
     ),
     # Windows 10/11 — Chrome 128, 1280×800
     (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
         "AppleWebKit/537.36 (KHTML, like Gecko) "
         "Chrome/128.0.0.0 Safari/537.36",
-        1280, 800, "America/Moncton",
+        1280, 800,
     ),
 ]
+
+# Shuffle once at import so we cycle through all profiles before repeating
+_profile_cycle = list(_DEVICE_PROFILES)
+random.shuffle(_profile_cycle)
+_profile_index = 0
+
+
+def _next_profile() -> tuple[str, int, int]:
+    """Return the next (user_agent, width, height) with small random jitter."""
+    global _profile_index
+    ua, base_w, base_h = _profile_cycle[_profile_index % len(_profile_cycle)]
+    _profile_index += 1
+
+    # Small viewport jitter (±0-80px) — simulates natural window resizing
+    w = base_w + random.randint(-80, 80)
+    h = base_h + random.randint(-50, 50)
+
+    return ua, max(800, w), max(600, h)
 
 # ── Rate limiter (thread-safe) ────────────────────────────────────────────────
 _request_lock      = threading.Lock()
@@ -135,8 +153,11 @@ def _get_context():
         )
         logger.info("Playwright: using bundled Chromium")
 
-    ua, vp_w, vp_h, tz = random.choice(_DEVICE_PROFILES)
-    logger.info("Device profile: %dx%d  tz=%s  ua=…%s", vp_w, vp_h, tz, ua[-40:])
+    # Context uses a baseline profile — each page overrides with its own
+    # random profile via _apply_profile() for per-fetch rotation.
+    ua, vp_w, vp_h = _next_profile()
+    tz = random.choice(["America/Halifax", "America/Toronto", "America/Moncton"])
+    logger.info("Context baseline: %dx%d  tz=%s  ua=…%s", vp_w, vp_h, tz, ua[-40:])
 
     state = _STATE_FILE if os.path.exists(_STATE_FILE) else None
     _context = _browser.new_context(
@@ -288,6 +309,22 @@ def warmup() -> None:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Per-page profile rotation
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _apply_profile(page) -> None:
+    """
+    Give this page a unique device fingerprint — different user agent and
+    viewport on every fetch so CanLII sees what looks like many different
+    users, not one bot hammering the site.
+    """
+    ua, w, h = _next_profile()
+    page.set_viewport_size({"width": w, "height": h})
+    page.set_extra_http_headers({"User-Agent": ua})
+    logger.debug("    Profile: %dx%d  ua=…%s", w, h, ua[-30:])
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Text extraction
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -351,6 +388,7 @@ def fetch_case_text(url: str) -> str | None:
 
     ctx  = _get_context()
     page = ctx.new_page()
+    _apply_profile(page)
 
     try:
         resp   = page.goto(html_url, wait_until="domcontentloaded", timeout=45_000)

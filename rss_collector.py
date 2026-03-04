@@ -51,9 +51,12 @@ def fetch_new_cases(seen_ids: set) -> list[dict]:
       {case_id, title, url, province, court_name, published_date}
     """
     new_cases: list[dict] = []
+    feed_health: list[dict] = []       # per-court health tracking
+    failed_feeds: list[str] = []
 
     for court in COURTS:
         logger.info("Fetching RSS → %s", court["name"])
+        court_new = 0
         try:
             feed = feedparser.parse(court["rss"])
 
@@ -65,8 +68,26 @@ def fetch_new_cases(seen_ids: set) -> list[dict]:
                     feed.bozo_exception,
                 )
 
+            total_entries = len(feed.entries)
+
             if not feed.entries:
                 logger.warning("No entries in feed for %s", court["name"])
+                failed_feeds.append(court["name"])
+                feed_health.append({
+                    "court": court["name"],
+                    "province": court["province"],
+                    "total": 0,
+                    "new": 0,
+                    "newest": "N/A",
+                    "status": "⚠ EMPTY",
+                })
+                time.sleep(REQUEST_DELAY_SECONDS)
+                continue
+
+            # Find the newest entry date for health reporting
+            entry_dates = [_parse_date(e) for e in feed.entries]
+            known_dates = [d for d in entry_dates if d != "Unknown"]
+            newest_date = max(known_dates) if known_dates else "Unknown"
 
             cutoff = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d")
 
@@ -102,11 +123,67 @@ def fetch_new_cases(seen_ids: set) -> list[dict]:
                         "rss_summary":    rss_summary,
                     }
                 )
+                court_new += 1
+
+            # Flag stale feeds — if the newest entry is over 14 days old,
+            # the feed may be broken or the court stopped publishing
+            days_old = None
+            status = "OK"
+            if newest_date != "Unknown":
+                try:
+                    days_old = (datetime.now() - datetime.strptime(newest_date, "%Y-%m-%d")).days
+                    if days_old > 14:
+                        status = f"⚠ STALE ({days_old}d old)"
+                except ValueError:
+                    pass
+
+            feed_health.append({
+                "court": court["name"],
+                "province": court["province"],
+                "total": total_entries,
+                "new": court_new,
+                "newest": newest_date,
+                "status": status,
+            })
 
         except Exception as exc:
             logger.error("Failed to fetch RSS for %s: %s", court["name"], exc)
+            failed_feeds.append(court["name"])
+            feed_health.append({
+                "court": court["name"],
+                "province": court["province"],
+                "total": 0,
+                "new": 0,
+                "newest": "N/A",
+                "status": f"✗ ERROR: {exc}",
+            })
 
         time.sleep(REQUEST_DELAY_SECONDS)
+
+    # ── Feed health summary ──────────────────────────────────────────────────
+    logger.info("─" * 65)
+    logger.info("RSS FEED HEALTH REPORT")
+    logger.info("%-45s %5s %4s  %-12s  %s", "Court", "Total", "New", "Newest", "Status")
+    logger.info("%-45s %5s %4s  %-12s  %s", "─" * 45, "─" * 5, "─" * 4, "─" * 12, "─" * 10)
+    for h in feed_health:
+        logger.info(
+            "%-45s %5d %4d  %-12s  %s",
+            h["court"], h["total"], h["new"], h["newest"], h["status"],
+        )
+    logger.info("─" * 65)
+
+    if failed_feeds:
+        logger.warning(
+            "⚠ %d feed(s) returned errors or empty: %s",
+            len(failed_feeds), ", ".join(failed_feeds),
+        )
+
+    stale = [h for h in feed_health if h["status"].startswith("⚠ STALE")]
+    if stale:
+        logger.warning(
+            "⚠ %d feed(s) appear stale (no entries in 14+ days): %s",
+            len(stale), ", ".join(h["court"] for h in stale),
+        )
 
     logger.info("RSS collection complete — %d new case(s) found", len(new_cases))
     return new_cases

@@ -22,9 +22,8 @@ from config import (
 
 logger = logging.getLogger(__name__)
 
-# max_retries=6 means the SDK will wait and retry automatically on 429s
-# using exponential backoff (2s, 4s, 8s … up to ~64s between attempts)
-_client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY, max_retries=6)
+# max_retries=0 — we handle all failures ourselves with an immediate OpenAI fallback
+_client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY, max_retries=0)
 
 # ── OpenAI fallback client (created lazily so the key is optional) ────────────
 _openai_client = None
@@ -41,8 +40,9 @@ def _get_openai_client():
 
 def _analyze_with_openai(prompt: str) -> dict | None:
     """
-    Fallback: send the same prompt to OpenAI GPT-4o-mini when Anthropic
-    is unavailable (529).  Uses json_object response_format for reliability.
+    Fallback: send the same prompt to OpenAI GPT-4o-mini on any Anthropic
+    failure (429, 529, network errors, etc.).
+    Uses json_object response_format for reliability.
     Returns a parsed result dict, or None on failure.
     """
     client = _get_openai_client()
@@ -183,66 +183,7 @@ def analyze_case(text: str, title: str, court: str = "", province: str = "") -> 
     except json.JSONDecodeError as exc:
         logger.error("JSON parse error for '%s': %s  |  raw=%s", title, exc, raw[:200])
         return None
-    except anthropic.RateLimitError:
-        # SDK retries (max_retries=6) were all exhausted — wait 90s and try once more
-        logger.warning("    Rate limit exhausted for '%s' — waiting 90s then retrying …", title)
-        time.sleep(90)
-        _last_call_time = 0.0   # force full delay gap on the next case too
-        try:
-            message = _client.messages.create(
-                model=CLAUDE_MODEL,
-                max_tokens=1024,
-                system=_SYSTEM,
-                messages=[{"role": "user", "content": prompt}],
-            )
-            raw    = message.content[0].text.strip()
-            result = json.loads(raw)
-            result.setdefault("damages", {})
-            _last_call_time = time.time()
-            return result
-        except Exception as retry_exc:
-            logger.error("    Retry also failed for '%s': %s", title, retry_exc)
-            return None
-    except anthropic.APIStatusError as exc:
-        if exc.status_code == 529:
-            # 529 = Anthropic servers overloaded — exponential backoff, 3 attempts
-            for attempt, wait in enumerate([60, 120, 240], 1):
-                logger.warning(
-                    "    529 overloaded for '%s' — waiting %ds (attempt %d/3) …",
-                    title, wait, attempt,
-                )
-                time.sleep(wait)
-                _last_call_time = 0.0
-                try:
-                    message = _client.messages.create(
-                        model=CLAUDE_MODEL,
-                        max_tokens=1024,
-                        system=_SYSTEM,
-                        messages=[{"role": "user", "content": prompt}],
-                    )
-                    raw    = message.content[0].text.strip()
-                    result = json.loads(raw)
-                    result.setdefault("damages", {})
-                    _last_call_time = time.time()
-                    return result
-                except anthropic.APIStatusError as inner:
-                    if inner.status_code == 529:
-                        continue   # still overloaded — try next backoff
-                    logger.error(
-                        "    API error %d on 529 retry for '%s': %s",
-                        inner.status_code, title, inner,
-                    )
-                    return None
-                except Exception as retry_exc:
-                    logger.error("    529 retry failed for '%s': %s", title, retry_exc)
-                    return None
-            logger.warning("    529 retries exhausted for '%s' — trying OpenAI fallback …", title)
-            return _analyze_with_openai(prompt)
-        logger.error("Anthropic API error %d for '%s': %s", exc.status_code, title, exc)
-        return None
-    except anthropic.APIError as exc:
-        logger.error("Anthropic API error for '%s': %s", title, exc)
-        return None
     except Exception as exc:
-        logger.error("Unexpected error analysing '%s': %s", title, exc)
-        return None
+        # Any Anthropic failure (429, 529, network, etc.) → immediate OpenAI fallback
+        logger.warning("    Anthropic failed for '%s': %s — switching to OpenAI …", title, exc)
+        return _analyze_with_openai(prompt)

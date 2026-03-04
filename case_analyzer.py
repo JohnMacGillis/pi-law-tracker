@@ -157,6 +157,32 @@ def analyze_case(text: str, title: str, court: str = "", province: str = "") -> 
         except Exception as retry_exc:
             logger.error("    Retry also failed for '%s': %s", title, retry_exc)
             return None
+    except anthropic.APIStatusError as exc:
+        if exc.status_code == 529:
+            # 529 = Anthropic servers overloaded — wait 60s and retry once
+            logger.warning(
+                "    Anthropic API overloaded (529) for '%s' — waiting 60s then retrying …",
+                title,
+            )
+            time.sleep(60)
+            _last_call_time = 0.0
+            try:
+                message = _client.messages.create(
+                    model=CLAUDE_MODEL,
+                    max_tokens=1024,
+                    system=_SYSTEM,
+                    messages=[{"role": "user", "content": prompt}],
+                )
+                raw    = message.content[0].text.strip()
+                result = json.loads(raw)
+                result.setdefault("damages", {})
+                _last_call_time = time.time()
+                return result
+            except Exception as retry_exc:
+                logger.error("    529 retry also failed for '%s': %s", title, retry_exc)
+                return None
+        logger.error("Anthropic API error %d for '%s': %s", exc.status_code, title, exc)
+        return None
     except anthropic.APIError as exc:
         logger.error("Anthropic API error for '%s': %s", title, exc)
         return None

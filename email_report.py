@@ -55,11 +55,9 @@ def _badge(case_type: str) -> str:
     colour = CASE_TYPE_COLOURS.get(case_type, "#6b7280")
     label  = case_type or "PI"
     return (
-        f'<table cellpadding="0" cellspacing="0" border="0">'
-        f'<tr><td style="background-color:{colour};color:#ffffff;font-size:11px;'
-        f'font-weight:700;padding:4px 14px;border-radius:20px;letter-spacing:0.4px;'
-        f'font-family:{_F};white-space:nowrap;mso-padding-alt:6px 14px;">'
-        f'{label}</td></tr></table>'
+        f'<span style="display:inline-block;background-color:{colour};color:#ffffff;'
+        f'font-size:11px;font-weight:700;padding:3px 10px;border-radius:12px;'
+        f'letter-spacing:0.3px;font-family:{_F};">{label}</span>'
     )
 
 
@@ -98,7 +96,7 @@ def _damages_table(case: dict) -> str:
         return ""
     return (
         f'<table cellpadding="0" cellspacing="0" border="0" width="100%" '
-        f'style="margin-top:14px;">'
+        f'style="margin-top:14px;table-layout:fixed;">'
         f'<tr><td colspan="2" style="padding:0 0 6px 0;font-size:10px;'
         f'font-weight:700;color:#9ca3af;text-transform:uppercase;letter-spacing:1px;'
         f'font-family:{_F};">Damages Awarded</td></tr>'
@@ -149,32 +147,25 @@ def _case_card(case: dict) -> str:
         )
 
     return f"""
-    <tr><td style="padding:0 0 14px 0;">
-      <!--[if mso]><table cellpadding="0" cellspacing="0" border="0" width="100%"
-        style="border:1px solid #e5e7eb;"><tr><td style="padding:18px 20px;">
-      <![endif]-->
-      <!--[if !mso]><!-->
+    <tr><td style="padding:0 0 12px 0;">
       <table cellpadding="0" cellspacing="0" border="0" width="100%"
-             style="background-color:#ffffff;border:1px solid #e5e7eb;border-radius:10px;">
-        <tr><td style="padding:18px 20px;">
-      <!--<![endif]-->
-          <table cellpadding="0" cellspacing="0" border="0" width="100%">
-            <tr>
-              <td valign="top" style="padding:0;">
-                <a href="{url}"
-                   style="font-size:14px;font-weight:700;color:#111827;text-decoration:none;
-                          font-family:{_F};line-height:1.35;">{title}</a>
-                <table cellpadding="0" cellspacing="0" border="0" style="margin-top:5px;"><tr>
-                  <td style="font-size:11px;color:#9ca3af;font-family:{_F};">{court}</td>
-                  <td style="font-size:11px;color:#d1d5db;padding:0 6px;
-                             font-family:{_F};">&bull;</td>
-                  <td style="font-size:11px;color:#9ca3af;font-family:{_F};">{date}</td>
-                </tr></table>
-              </td>
-              <td align="right" valign="top" style="padding:0 0 0 12px;white-space:nowrap;">
-                {_badge(ctype)}
-              </td>
-            </tr>
+             style="background-color:#ffffff;border:1px solid #e5e7eb;border-radius:8px;">
+        <tr><td style="padding:16px;">
+          <table cellpadding="0" cellspacing="0" border="0" width="100%"
+                 style="table-layout:fixed;word-wrap:break-word;">
+            <!-- Badge + Court + Date -->
+            <tr><td style="padding:0 0 8px 0;font-size:0;">
+              {_badge(ctype)}
+              <span style="display:inline-block;font-size:11px;color:#9ca3af;
+                           font-family:{_F};padding-left:8px;vertical-align:middle;">
+                {court} &bull; {date}</span>
+            </td></tr>
+            <!-- Title -->
+            <tr><td style="padding:0;">
+              <a href="{url}"
+                 style="font-size:14px;font-weight:700;color:#111827;text-decoration:none;
+                        font-family:{_F};line-height:1.4;word-wrap:break-word;">{title}</a>
+            </td></tr>
             {damages_html}
             {summary_html}
             {notes_html}
@@ -293,14 +284,11 @@ def build_html(cases: list[dict], week_start: datetime, week_end: datetime) -> s
          style="background-color:#f3f4f6;">
     <tr><td align="center" style="padding:24px 12px 40px 12px;">
 
-      <!-- Inner container — 100% on mobile, max 560px on desktop -->
-      <!--[if mso]><table cellpadding="0" cellspacing="0" border="0" width="560"
-        style="width:560px;"><tr><td>
-      <![endif]-->
-      <!--[if !mso]><!-->
-      <table cellpadding="0" cellspacing="0" border="0"
-             style="width:100%;max-width:560px;border-radius:12px;overflow:hidden;
+      <!-- Inner container — 480px max, shrinks on mobile -->
+      <table cellpadding="0" cellspacing="0" border="0" width="480"
+             style="width:480px;max-width:100%;border-radius:12px;overflow:hidden;
                     box-shadow:0 1px 3px rgba(0,0,0,0.06),0 2px 12px rgba(0,0,0,0.04);">
+      <!--[if !mso]><!-->
       <!--<![endif]-->
 
         <!-- HEADER -->
@@ -347,7 +335,6 @@ def build_html(cases: list[dict], week_start: datetime, week_end: datetime) -> s
         </td></tr>
 
       </table>
-      <!--[if mso]></td></tr></table><![endif]-->
 
     </td></tr>
   </table>
@@ -370,8 +357,8 @@ def send_alert_email(subject: str, body: str) -> bool:
 <body style="font-family:{_F};background:#f3f4f6;margin:0;padding:0;">
   <table cellpadding="0" cellspacing="0" border="0" width="100%" bgcolor="#f3f4f6">
     <tr><td align="center" style="padding:24px 12px;">
-      <table cellpadding="0" cellspacing="0" border="0"
-             style="width:100%;max-width:480px;border-radius:10px;overflow:hidden;
+      <table cellpadding="0" cellspacing="0" border="0" width="420"
+             style="width:420px;max-width:100%;border-radius:10px;overflow:hidden;
                     box-shadow:0 1px 3px rgba(0,0,0,0.06);">
         <tr><td bgcolor="#dc2626" style="background-color:#dc2626;padding:18px 24px;">
           <table cellpadding="0" cellspacing="0" border="0"><tr>

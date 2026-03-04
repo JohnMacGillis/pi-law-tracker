@@ -183,50 +183,44 @@ def _pause() -> None:
 
 def warmup() -> None:
     """
-    Navigate to the CanLII home page to establish a DataDome session before
-    fetching any cases.
+    Navigate to the CanLII home page once to establish a DataDome session.
 
-    If DataDome shows a CAPTCHA, the browser window will be visible on screen.
-    Solve it manually — the run waits up to 2 minutes, checking every 5 seconds
-    until CanLII returns a 200.  Once the session is clean it is saved to disk
-    so future runs rarely need this.
+    If a CAPTCHA appears, solve it in the browser window — the script waits
+    silently (no re-navigation) for up to 2 minutes until the real CanLII
+    page loads, then saves the session and continues.
     """
     ctx  = _get_context()
     page = ctx.new_page()
     try:
-        logger.info("Warming up — navigating to CanLII home page …")
-        resp   = page.goto("https://www.canlii.org/en/",
-                           wait_until="domcontentloaded", timeout=30_000)
-        status = resp.status if resp else 0
+        logger.info("Warming up — navigating to CanLII …")
+        page.goto("https://www.canlii.org/en/",
+                  wait_until="domcontentloaded", timeout=30_000)
 
-        if status == 200:
-            logger.info("Session OK — CanLII home page loaded cleanly.")
-            _save_state()
-            return
-
-        # Non-200: likely a CAPTCHA or bot challenge page
-        logger.warning(
-            "CanLII returned HTTP %d — a CAPTCHA may be showing in the browser. "
-            "Please solve it now. Waiting up to 2 minutes …", status,
+        # Wait for real CanLII content without re-navigating.
+        # CAPTCHA pages are short; the real CanLII home has substantial content.
+        # We check silently every few seconds — no browser interference.
+        logger.info(
+            "Waiting for CanLII to load cleanly "
+            "(solve any CAPTCHA in the browser window) …"
         )
-        for _ in range(24):          # 24 × 5s = 2 minutes
-            time.sleep(5)
-            try:
-                resp   = page.goto("https://www.canlii.org/en/",
-                                   wait_until="domcontentloaded", timeout=15_000)
-                status = resp.status if resp else 0
-                if status == 200:
-                    logger.info("CAPTCHA solved — session is now clean.")
-                    _save_state()
-                    return
-            except Exception:
-                pass
+        try:
+            page.wait_for_function(
+                # Real CanLII pages have a visible search bar or nav links.
+                # DataDome challenge pages are tiny by comparison.
+                "() => document.body.innerText.length > 1500",
+                timeout=120_000,   # wait up to 2 minutes
+                polling=3_000,     # check every 3 seconds (no navigation)
+            )
+            logger.info("Session OK — CanLII loaded cleanly.")
+        except PWTimeout:
+            logger.warning(
+                "Could not confirm CanLII loaded within 2 min. "
+                "Proceeding anyway — delete data/browser_state.json and "
+                "re-run if you continue getting 403 errors."
+            )
 
-        logger.error(
-            "Could not establish a clean CanLII session after 2 minutes. "
-            "Case fetching will likely produce 403 errors. "
-            "Delete data/browser_state.json and run again to retry."
-        )
+        _save_state()
+
     except Exception as exc:
         logger.error("Warm-up error: %s", exc)
     finally:

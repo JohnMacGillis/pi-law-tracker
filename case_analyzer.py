@@ -15,13 +15,59 @@ import time
 
 import anthropic
 
-from config import ANTHROPIC_API_KEY, CLAUDE_MODEL, CLAUDE_DELAY_SECONDS
+from config import (
+    ANTHROPIC_API_KEY, CLAUDE_MODEL, CLAUDE_DELAY_SECONDS,
+    OPENAI_API_KEY, OPENAI_MODEL,
+)
 
 logger = logging.getLogger(__name__)
 
 # max_retries=6 means the SDK will wait and retry automatically on 429s
 # using exponential backoff (2s, 4s, 8s … up to ~64s between attempts)
 _client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY, max_retries=6)
+
+# ── OpenAI fallback client (created lazily so the key is optional) ────────────
+_openai_client = None
+
+def _get_openai_client():
+    global _openai_client
+    if _openai_client is None:
+        if not OPENAI_API_KEY:
+            return None
+        import openai as _openai_module
+        _openai_client = _openai_module.OpenAI(api_key=OPENAI_API_KEY)
+    return _openai_client
+
+
+def _analyze_with_openai(prompt: str) -> dict | None:
+    """
+    Fallback: send the same prompt to OpenAI GPT-4o-mini when Anthropic
+    is unavailable (529).  Uses json_object response_format for reliability.
+    Returns a parsed result dict, or None on failure.
+    """
+    client = _get_openai_client()
+    if client is None:
+        logger.warning("    OpenAI fallback not configured — set OPENAI_API_KEY in config.py")
+        return None
+    try:
+        logger.info("    Trying OpenAI fallback (%s) …", OPENAI_MODEL)
+        response = client.chat.completions.create(
+            model=OPENAI_MODEL,
+            max_tokens=1024,
+            response_format={"type": "json_object"},
+            messages=[
+                {"role": "system", "content": _SYSTEM},
+                {"role": "user",   "content": prompt},
+            ],
+        )
+        raw    = response.choices[0].message.content.strip()
+        result = json.loads(raw)
+        result.setdefault("damages", {})
+        logger.info("    OpenAI fallback succeeded")
+        return result
+    except Exception as exc:
+        logger.error("    OpenAI fallback failed: %s", exc)
+        return None
 
 # Tracks when we last called the API so we only sleep the *remaining* gap,
 # not the full CLAUDE_DELAY_SECONDS every time.
@@ -190,8 +236,8 @@ def analyze_case(text: str, title: str, court: str = "", province: str = "") -> 
                 except Exception as retry_exc:
                     logger.error("    529 retry failed for '%s': %s", title, retry_exc)
                     return None
-            logger.error("    529 retries exhausted for '%s'", title)
-            return None
+            logger.warning("    529 retries exhausted for '%s' — trying OpenAI fallback …", title)
+            return _analyze_with_openai(prompt)
         logger.error("Anthropic API error %d for '%s': %s", exc.status_code, title, exc)
         return None
     except anthropic.APIError as exc:

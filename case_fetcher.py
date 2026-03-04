@@ -57,14 +57,25 @@ def _get_context():
 
     os.makedirs(DATA_DIR, exist_ok=True)
 
-    _pw      = sync_playwright().start()
-    _browser = _pw.chromium.launch(
-        headless=False,                     # Headed = much harder to detect
-        args=[
-            "--start-minimized",            # Stays in taskbar, not in focus
-            "--disable-blink-features=AutomationControlled",
-        ],
-    )
+    _pw = sync_playwright().start()
+
+    # Prefer real Google Chrome (perfect fingerprint) over bundled Chromium
+    try:
+        _browser = _pw.chromium.launch(
+            channel="chrome",
+            headless=False,
+            args=["--start-minimized"],
+        )
+        logger.info("Playwright: using real Chrome")
+    except Exception:
+        _browser = _pw.chromium.launch(
+            headless=False,
+            args=[
+                "--start-minimized",
+                "--disable-blink-features=AutomationControlled",
+            ],
+        )
+        logger.info("Playwright: using bundled Chromium")
 
     state = _STATE_FILE if os.path.exists(_STATE_FILE) else None
     _context = _browser.new_context(
@@ -72,6 +83,16 @@ def _get_context():
         viewport={"width": 1920, "height": 1080},
         locale="en-CA",
         timezone_id="America/Halifax",
+        user_agent=(
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/120.0.0.0 Safari/537.36"
+        ),
+    )
+
+    # Remove the webdriver flag that bot-detection looks for
+    _context.add_init_script(
+        "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
     )
 
     logger.info(

@@ -27,7 +27,6 @@ import logging
 import os
 import sys
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 
 # Run from the script's own directory regardless of how Task Scheduler calls it
@@ -60,9 +59,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger("daily_run")
 
-# Parallel PDF workers — 2 balances speed vs. CanLII rate limits
-FETCH_WORKERS      = 2
-RETRY_COOLDOWN_SEC = 30    # Pause between cookie refresh and retry pass
+RETRY_COOLDOWN_SEC = 30    # Pause between session reset and retry pass
 
 
 # ── Cookie refresh helpers ────────────────────────────────────────────────────
@@ -112,37 +109,30 @@ def _run_fetch_phase(
     cases: list[dict],
 ) -> tuple[list[tuple[dict, str]], set[str], int]:
     """
-    Download PDFs for `cases` in parallel.
+    Fetch case text sequentially.
+    Playwright's sync API is not thread-safe, so we iterate rather than
+    using a thread pool.  Rate limiting is handled inside fetch_case_text.
 
-    Returns
-    -------
-    (fetch_results, failed_ids, error_count)
-      fetch_results — list of (case_meta, raw_text) for successful fetches
-      failed_ids    — set of case_ids that returned None (403 / empty)
-      error_count   — number of errors (same as len(failed_ids) + unexpected)
+    Returns (fetch_results, failed_ids, error_count).
     """
     results:    list[tuple[dict, str]] = []
     failed_ids: set[str]               = set()
     errors      = 0
 
-    with ThreadPoolExecutor(max_workers=FETCH_WORKERS) as pool:
-        future_map = {pool.submit(fetch_case_text, c["url"]): c for c in cases}
-
-        for future in as_completed(future_map):
-            case_meta = future_map[future]
-            title     = case_meta["title"]
-            try:
-                raw_text = future.result()
-                if raw_text is None:
-                    logger.warning("─── %s\n    fetch failed (403 or empty)", title)
-                    failed_ids.add(case_meta["case_id"])
-                    errors += 1
-                else:
-                    logger.info("─── %s\n    PDF: %d chars", title, len(raw_text))
-                    results.append((case_meta, raw_text))
-            except Exception as exc:
-                logger.error("Unexpected fetch error for '%s': %s", title, exc)
+    for case_meta in cases:
+        title = case_meta["title"]
+        try:
+            raw_text = fetch_case_text(case_meta["url"])
+            if raw_text is None:
+                logger.warning("─── %s\n    fetch failed (403 or empty)", title)
+                failed_ids.add(case_meta["case_id"])
                 errors += 1
+            else:
+                logger.info("─── %s\n    fetched: %d chars", title, len(raw_text))
+                results.append((case_meta, raw_text))
+        except Exception as exc:
+            logger.error("Unexpected fetch error for '%s': %s", title, exc)
+            errors += 1
 
     return results, failed_ids, errors
 

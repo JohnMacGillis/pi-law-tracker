@@ -211,10 +211,7 @@ def run() -> None:
         return
 
     # ── Phase 1: Parallel PDF fetch (candidates only) ─────────────────────────
-    logger.info(
-        "Phase 1: fetching %d PDFs with %d parallel workers …",
-        len(candidates), FETCH_WORKERS,
-    )
+    logger.info("Phase 1: fetching %d cases sequentially …", len(candidates))
 
     fetch_results, fetch_failed_ids, phase1_errors = _run_fetch_phase(candidates)
     errors += phase1_errors

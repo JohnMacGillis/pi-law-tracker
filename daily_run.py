@@ -307,6 +307,57 @@ def run() -> None:
     # Close the browser and persist the session for tomorrow's run
     close_browser()
 
+    # ── Error summary alert ────────────────────────────────────────────────
+    if errors > 0:
+        _send_run_summary_alert(saved, skipped, errors, elapsed)
+
+
+# ── Failure notification helpers ─────────────────────────────────────────────
+
+def _send_run_summary_alert(saved: int, skipped: int, errors: int,
+                            elapsed: int) -> None:
+    """Send a brief email when the daily run finishes with errors."""
+    try:
+        from email_report import send_alert_email
+        send_alert_email(
+            subject=f"PI Law Tracker — {errors} error(s) in daily run",
+            body=(
+                f"<p>The daily run finished in {elapsed}s with "
+                f"<strong>{errors} error(s)</strong>.</p>"
+                f"<p>Saved: {saved} &nbsp;|&nbsp; Skipped: {skipped} "
+                f"&nbsp;|&nbsp; Errors: {errors}</p>"
+                f"<p>Check the log file for details.</p>"
+            ),
+        )
+    except Exception as exc:
+        logger.warning("Could not send run-summary alert: %s", exc)
+
+
+def _send_crash_alert(error: Exception) -> None:
+    """Send an email when the daily run crashes entirely."""
+    import traceback
+    tb = traceback.format_exc()
+    try:
+        from email_report import send_alert_email
+        send_alert_email(
+            subject="PI Law Tracker — daily run CRASHED",
+            body=(
+                f"<p>The daily run crashed with an unhandled exception:</p>"
+                f"<pre style=\"font-size:12px;background:#f3f4f6;"
+                f"padding:12px;border-radius:6px;overflow-x:auto;\">"
+                f"{tb}</pre>"
+                f"<p>The run did not complete. Check the log and fix "
+                f"the issue before the next scheduled run.</p>"
+            ),
+        )
+    except Exception as exc:
+        logger.warning("Could not send crash alert email: %s", exc)
+
 
 if __name__ == "__main__":
-    run()
+    try:
+        run()
+    except Exception as exc:
+        logger.critical("UNHANDLED EXCEPTION — daily run crashed: %s", exc,
+                        exc_info=True)
+        _send_crash_alert(exc)

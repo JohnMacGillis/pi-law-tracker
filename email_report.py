@@ -43,6 +43,8 @@ CASE_TYPE_COLOURS = {
     "Slip and Fall":"#e67e00",   # orange
     "Trip and Fall":"#e67e00",
     "Other PI":     "#6b7280",   # grey
+    "LTD":          "#0b7c3e",   # green
+    "Class Action": "#7b1fa2",   # purple
 }
 
 
@@ -161,7 +163,7 @@ def build_html(cases: list[dict], week_start: datetime, week_end: datetime) -> s
     if total == 0:
         body_html = (
             '<p style="color:#555;font-size:14px;text-align:center;padding:30px 0;">'
-            "No new personal injury damages decisions were identified this week."
+            "No new personal injury, LTD, or class action decisions were identified this week."
             "</p>"
         )
     else:
@@ -208,7 +210,7 @@ def build_html(cases: list[dict], week_start: datetime, week_end: datetime) -> s
       <p style="margin:0 0 4px;font-size:11px;font-weight:600;color:#7a8fb5;
                 letter-spacing:1px;text-transform:uppercase;">Weekly Digest</p>
       <h1 style="margin:0;font-size:22px;font-weight:700;color:#ffffff;">
-        PI Damages Report
+        PI · LTD · Class Action Report
       </h1>
       <p style="margin:6px 0 0;font-size:13px;color:#9dafc8;">
         {date_range} &nbsp;·&nbsp;

@@ -68,6 +68,26 @@ _HIGH_CONFIDENCE = [
     "dog owners liability",
     "icbc",
 
+    # Long-term disability (LTD) insurance — highly specific phrases
+    "long-term disability",
+    "long term disability",
+    "ltd benefits",
+    "disability insurer",
+    "group disability",
+    "own occupation",
+    "disability policy",
+    "disability insurance policy",
+    "wrongful denial of benefits",
+    "bad faith denial",
+
+    # Class actions
+    "class action",
+    "class proceeding",
+    "certification order",
+    "representative plaintiff",
+    "common issues trial",
+    "class members",
+
     # Common Canadian PI phrasing
     "motor vehicle",          # civil context covered — criminal caught by exclusions
     "injuries sustained",
@@ -116,6 +136,10 @@ _SUPPORTING = [
     "functional capacity",
     "accident benefits",
     "statutory accident benefits",
+    "disability benefits",
+    "bad faith",
+    "aggregate damages",
+    "common issues",
 ]
 
 # ── EXCLUSION keywords ────────────────────────────────────────────────────────

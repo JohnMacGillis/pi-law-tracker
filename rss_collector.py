@@ -8,7 +8,7 @@ import html
 import re
 import time
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import feedparser
 
@@ -68,9 +68,17 @@ def fetch_new_cases(seen_ids: set) -> list[dict]:
             if not feed.entries:
                 logger.warning("No entries in feed for %s", court["name"])
 
+            cutoff = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d")
+
             for entry in feed.entries:
                 case_id = _case_id_from_entry(entry)
                 if not case_id or case_id in seen_ids:
+                    continue
+
+                # Skip cases older than 7 days — prevents reprocessing stale
+                # entries if seen_ids is ever cleared
+                pub_date = _parse_date(entry)
+                if pub_date != "Unknown" and pub_date < cutoff:
                     continue
 
                 # CanLII RSS summaries contain the opening paragraphs of the

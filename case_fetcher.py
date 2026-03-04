@@ -297,12 +297,25 @@ def fetch_case_text(url: str) -> str | None:
         status = resp.status if resp else 0
 
         if status == 403:
-            _consecutive_403s += 1
+            # Single-case retry: pause 60-120 s then try once more before
+            # counting this as a failure.  DataDome often clears after a
+            # longer natural gap.
+            retry_wait = random.randint(60, 120)
             logger.warning(
-                "    403 on %s  (consecutive: %d/%d)",
-                html_url, _consecutive_403s, _403_THRESHOLD,
+                "    403 on %s — waiting %ds then retrying once …",
+                html_url, retry_wait,
             )
-            return None
+            time.sleep(retry_wait)
+            resp2  = page.goto(html_url, wait_until="domcontentloaded", timeout=45_000)
+            status = resp2.status if resp2 else 0
+            if status == 403:
+                _consecutive_403s += 1
+                logger.warning(
+                    "    403 again on %s  (consecutive: %d/%d)",
+                    html_url, _consecutive_403s, _403_THRESHOLD,
+                )
+                return None
+            # Retry succeeded — fall through to text extraction below
 
         if status == 429:
             retry_after = int((resp.headers or {}).get("retry-after", "60"))

@@ -124,7 +124,7 @@ Return ONLY this JSON object (fill null where information is not present):
 {{
   "is_relevant": true | false,
   "case_type": "MVA" | "Slip and Fall" | "Trip and Fall" | "Other PI" | "LTD" | "Class Action" | null,
-  "summary": "<2-3 sentence plain-language summary of facts and outcome, or null>",
+  "summary": "<plain-language summary of facts and outcome, 3 sentences MAX, or null>",
   "damages": {{
     "non_pecuniary":      "<PI only: dollar amount e.g. '$75,000', or null>",
     "general_damages":    "<use only if non-pecuniary not itemised separately, or null>",

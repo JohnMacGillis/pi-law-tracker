@@ -97,9 +97,6 @@ def _damages_table(case: dict) -> str:
     return (
         f'<table cellpadding="0" cellspacing="0" border="0" width="100%" '
         f'style="margin-top:14px;table-layout:fixed;">'
-        f'<tr><td colspan="2" style="padding:0 0 6px 0;font-size:10px;'
-        f'font-weight:700;color:#9ca3af;text-transform:uppercase;letter-spacing:1px;'
-        f'font-family:{_F};">Damages Awarded</td></tr>'
         f'{rows}</table>'
     )
 
@@ -119,19 +116,13 @@ def _case_card(case: dict) -> str:
     if dmg_table:
         damages_html = f'<tr><td colspan="2" style="padding:0;">{dmg_table}</td></tr>'
 
-    # Summary in a contained box below damages
+    # Summary — no label, just text
     summary_html = ""
     if summary:
         summary_html = (
-            f'<tr><td colspan="2" style="padding:14px 0 0 0;">'
-            f'<table cellpadding="0" cellspacing="0" border="0" width="100%">'
-            f'<tr><td style="padding:0 0 5px 0;font-size:10px;font-weight:700;'
-            f'color:#9ca3af;text-transform:uppercase;letter-spacing:1px;'
-            f'font-family:{_F};">Summary</td></tr>'
-            f'<tr><td style="background-color:#f9fafb;border:1px solid #e5e7eb;'
-            f'border-radius:8px;padding:12px 14px;font-size:13px;color:#374151;'
-            f'line-height:1.65;font-family:{_F};">{summary}</td></tr>'
-            f'</table></td></tr>'
+            f'<tr><td colspan="2" style="padding:12px 0 0 0;'
+            f'font-size:13px;color:#374151;line-height:1.65;'
+            f'font-family:{_F};">{summary}</td></tr>'
         )
 
     # Notes callout
@@ -181,13 +172,13 @@ def _province_section(province: str, cases: list[dict]) -> str:
     label = f"{count} case{'s' if count != 1 else ''}"
     cards = "".join(_case_card(c) for c in cases)
     return f"""
-    <tr><td style="padding:24px 0 12px 0;">
+    <tr><td style="padding:20px 0 10px 0;">
       <table cellpadding="0" cellspacing="0" border="0" width="100%">
-        <tr><td style="font-size:15px;font-weight:700;color:#111827;
-                       font-family:{_F};padding:0 0 10px 0;
-                       border-bottom:2px solid #2563eb;">
-          {name}<span style="font-size:12px;font-weight:400;color:#9ca3af;
-                             margin-left:8px;">{label}</span>
+        <tr><td style="font-size:14px;font-weight:700;color:#1e293b;
+                       font-family:{_F};padding:0 0 8px 0;
+                       border-bottom:1px solid #e2e8f0;">
+          {name}<span style="font-size:12px;font-weight:400;color:#94a3b8;
+                             margin-left:6px;">&mdash; {label}</span>
         </td></tr>
       </table>
     </td></tr>
@@ -206,8 +197,7 @@ def build_html(cases: list[dict], week_start: datetime, week_end: datetime) -> s
         body_html = (
             '<tr><td style="padding:40px 0;text-align:center;font-size:14px;'
             f'color:#9ca3af;font-family:{_F};">'
-            'No new personal injury, LTD, or class action decisions '
-            'were identified this week.</td></tr>'
+            'Nothing new this week.</td></tr>'
         )
     else:
         by_prov: dict[str, list] = {}
@@ -234,36 +224,6 @@ def build_html(cases: list[dict], week_start: datetime, week_end: datetime) -> s
     prov_count = len(set(c.get("province", "") for c in cases)) if cases else 0
     prov_note  = (f" across {prov_count} province{'s' if prov_count != 1 else ''}"
                   if prov_count > 1 else "")
-
-    # Stats bar
-    type_counts: dict[str, int] = {}
-    for c in cases:
-        ct = c.get("case_type", "Other") or "Other"
-        type_counts[ct] = type_counts.get(ct, 0) + 1
-
-    stats_cells = ""
-    for ct in ["MVA", "Slip and Fall", "LTD", "Class Action", "Other PI"]:
-        if ct in type_counts:
-            colour = CASE_TYPE_COLOURS.get(ct, "#6b7280")
-            stats_cells += (
-                f'<td align="center" style="padding:0 14px;">'
-                f'<table cellpadding="0" cellspacing="0" border="0"><tr>'
-                f'<td align="center" style="font-size:22px;font-weight:700;color:#ffffff;'
-                f'font-family:{_F};line-height:1;">{type_counts[ct]}</td></tr><tr>'
-                f'<td align="center" style="font-size:10px;font-weight:600;color:{colour};'
-                f'text-transform:uppercase;letter-spacing:0.5px;padding-top:4px;'
-                f'font-family:{_F};">{ct}</td>'
-                f'</tr></table></td>'
-            )
-
-    stats_row = ""
-    if stats_cells and total > 1:
-        stats_row = (
-            f'<tr><td style="padding:20px 0 0 0;">'
-            f'<table cellpadding="0" cellspacing="0" border="0" align="center"><tr>'
-            f'{stats_cells}'
-            f'</tr></table></td></tr>'
-        )
 
     return f"""<!DOCTYPE html>
 <html lang="en" xmlns="http://www.w3.org/1999/xhtml">
@@ -292,21 +252,17 @@ def build_html(cases: list[dict], week_start: datetime, week_end: datetime) -> s
       <!--<![endif]-->
 
         <!-- HEADER -->
-        <tr><td bgcolor="#0f172a" style="background-color:#0f172a;padding:28px 24px 24px 24px;">
+        <tr><td bgcolor="#0f172a" style="background-color:#0f172a;padding:24px 24px 20px 24px;">
           <table cellpadding="0" cellspacing="0" border="0" width="100%">
-            <tr><td style="font-size:10px;font-weight:700;color:#64748b;
-                          letter-spacing:1.5px;text-transform:uppercase;padding:0 0 8px 0;
-                          font-family:{_F};">Weekly Digest</td></tr>
-            <tr><td style="font-size:22px;font-weight:700;color:#ffffff;line-height:1.25;
-                          padding:0 0 10px 0;font-family:{_F};">
-              PI &middot; LTD &middot; Class Action Report</td></tr>
+            <tr><td style="font-size:20px;font-weight:700;color:#ffffff;line-height:1.3;
+                          padding:0 0 8px 0;font-family:{_F};">
+              PI Damages Weekly</td></tr>
             <tr><td style="font-size:13px;color:#94a3b8;line-height:1.4;
                           font-family:{_F};">
               {date_range}
-              <span style="color:#475569;">&nbsp;&middot;&nbsp;</span>
+              &nbsp;&bull;&nbsp;
               <strong style="color:#e2e8f0;">{total} new {plural}{prov_note}</strong>
             </td></tr>
-            {stats_row}
           </table>
         </td></tr>
 
@@ -319,17 +275,13 @@ def build_html(cases: list[dict], week_start: datetime, week_end: datetime) -> s
 
         <!-- FOOTER -->
         <tr><td bgcolor="#f8fafc" style="background-color:#f8fafc;
-                       border-top:1px solid #e5e7eb;padding:18px 24px;">
+                       border-top:1px solid #e5e7eb;padding:14px 24px;">
           <table cellpadding="0" cellspacing="0" border="0" width="100%">
-            <tr><td align="center" style="font-size:11px;color:#9ca3af;line-height:1.7;
+            <tr><td align="center" style="font-size:11px;color:#b0b7c3;line-height:1.5;
                                           font-family:{_F};">
-              Generated by <strong style="color:#6b7280;">PI Law Tracker</strong>
-              <span style="color:#d1d5db;">&nbsp;&middot;&nbsp;</span>
               Cases sourced from
-              <a href="https://www.canlii.org" style="color:#6b7280;text-decoration:none;">CanLII</a>
-              <br>
-              <em style="color:#9ca3af;">AI-generated summaries are for research purposes
-              only and must be verified against the original decision.</em>
+              <a href="https://www.canlii.org" style="color:#9ca3af;text-decoration:none;">CanLII</a>
+              &nbsp;&bull;&nbsp; Verify all figures against the original decision
             </td></tr>
           </table>
         </td></tr>

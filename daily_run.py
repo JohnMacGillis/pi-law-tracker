@@ -7,18 +7,27 @@ Three-phase pipeline:
              No network I/O — eliminates the bulk of non-PI cases for free.
   Phase 1 — Parallel PDF fetch (FETCH_WORKERS concurrent connections)
              Only the cases that survived Phase 0.
+             If 403s trigger a cookie refresh, failed cases are retried
+             automatically within the same run (30-second cooldown).
   Phase 2 — Full-text pre-filter + Claude analysis on surviving cases.
              Claude calls are rate-limited with an adaptive delay.
 
+Discovery:
+  Uses the CanLII API if CANLII_API_KEY is set in config.py (recommended —
+  no DataDome, no cookies required at the discovery stage).
+  Falls back to RSS feeds if no API key is present.
+
 Cookie refresh:
   If CanLII returns 3+ consecutive 403s, refresh_cookies.py is launched
-  automatically. Failed cases are un-marked so tomorrow's run retries them.
+  automatically. After the refresh, Phase 1 failures are retried once.
+  Cases that still fail are un-marked so tomorrow's run retries them.
 """
 
 import logging
 import os
 import subprocess
 import sys
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 
@@ -27,13 +36,15 @@ os.chdir(os.path.dirname(os.path.abspath(__file__)))
 
 from config import DATA_DIR, LOG_FILE, MAX_CASE_CHARS
 from database import ensure_data_dir, load_seen_ids, mark_seen, save_case, unmark_seen
-from rss_collector import fetch_new_cases
 from case_fetcher import (
     fetch_case_text, smart_truncate,
     needs_cookie_refresh, rebuild_session, reset_403_counter,
 )
 from case_analyzer import analyze_case
 from case_prefilter import prequalify, prequalify_title
+
+import api_collector
+import rss_collector
 
 
 # ── Logging ───────────────────────────────────────────────────────────────────
@@ -51,7 +62,8 @@ logging.basicConfig(
 logger = logging.getLogger("daily_run")
 
 # Parallel PDF workers — 2 balances speed vs. CanLII rate limits
-FETCH_WORKERS = 2
+FETCH_WORKERS      = 2
+RETRY_COOLDOWN_SEC = 30    # Pause between cookie refresh and retry pass
 
 
 # ── Cookie refresh helpers ────────────────────────────────────────────────────
@@ -90,11 +102,53 @@ def _send_cookie_alert() -> None:
                 "<p><strong>Action:</strong> Double-click "
                 "<em>REFRESH COOKIES.bat</em> on the Desktop, solve the slider "
                 "if it appears, then click OK.</p>"
-                "<p>Missed cases have been un-marked and will retry tomorrow.</p>"
+                "<p>Missed cases are being retried automatically. If they still "
+                "fail, they will be un-marked and retried tomorrow.</p>"
             ),
         )
     except Exception as exc:
         logger.warning("Could not send alert email: %s", exc)
+
+
+# ── PDF fetch helper (called twice when retry is needed) ──────────────────────
+
+def _run_fetch_phase(
+    cases: list[dict],
+) -> tuple[list[tuple[dict, str]], set[str], int]:
+    """
+    Download PDFs for `cases` in parallel.
+
+    Returns
+    -------
+    (fetch_results, failed_ids, error_count)
+      fetch_results — list of (case_meta, raw_text) for successful fetches
+      failed_ids    — set of case_ids that returned None (403 / empty)
+      error_count   — number of errors (same as len(failed_ids) + unexpected)
+    """
+    results:    list[tuple[dict, str]] = []
+    failed_ids: set[str]               = set()
+    errors      = 0
+
+    with ThreadPoolExecutor(max_workers=FETCH_WORKERS) as pool:
+        future_map = {pool.submit(fetch_case_text, c["url"]): c for c in cases}
+
+        for future in as_completed(future_map):
+            case_meta = future_map[future]
+            title     = case_meta["title"]
+            try:
+                raw_text = future.result()
+                if raw_text is None:
+                    logger.warning("─── %s\n    fetch failed (403 or empty)", title)
+                    failed_ids.add(case_meta["case_id"])
+                    errors += 1
+                else:
+                    logger.info("─── %s\n    PDF: %d chars", title, len(raw_text))
+                    results.append((case_meta, raw_text))
+            except Exception as exc:
+                logger.error("Unexpected fetch error for '%s': %s", title, exc)
+                errors += 1
+
+    return results, failed_ids, errors
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
@@ -108,7 +162,14 @@ def run() -> None:
     seen_ids = load_seen_ids()
     logger.info("Known case IDs: %d", len(seen_ids))
 
-    new_cases = fetch_new_cases(seen_ids)
+    # ── Discovery: API (preferred) or RSS fallback ────────────────────────────
+    if api_collector.api_available():
+        logger.info("Discovery: CanLII API")
+        new_cases = api_collector.fetch_new_cases(seen_ids)
+    else:
+        logger.info("Discovery: RSS feeds (set CANLII_API_KEY in config.py for API)")
+        new_cases = rss_collector.fetch_new_cases(seen_ids)
+
     logger.info("New cases to evaluate: %d", len(new_cases))
 
     if not new_cases:
@@ -124,7 +185,6 @@ def run() -> None:
     saved   = 0
     skipped = 0
     errors  = 0
-    fetch_failed_ids: set[str] = set()
 
     # ── Phase 0: Instant pre-filter (title + RSS summary) ─────────────────────
     # No network I/O — runs on all cases before any PDF is downloaded.
@@ -142,7 +202,8 @@ def run() -> None:
             skipped += 1
             continue
 
-        # RSS summary check — keyword scan on text already in the feed
+        # RSS summary check — keyword scan on text already in the feed.
+        # API discovery doesn't include summaries so this only runs for RSS.
         rss_summary = case_meta.get("rss_summary", "")
         if len(rss_summary) > 150:
             is_candidate, reason = prequalify(rss_summary, title)
@@ -169,39 +230,42 @@ def run() -> None:
         len(candidates), FETCH_WORKERS,
     )
 
-    fetch_results: list[tuple[dict, str]] = []
+    fetch_results, fetch_failed_ids, phase1_errors = _run_fetch_phase(candidates)
+    errors += phase1_errors
 
-    with ThreadPoolExecutor(max_workers=FETCH_WORKERS) as pool:
-        future_map = {pool.submit(fetch_case_text, c["url"]): c for c in candidates}
+    # ── Cookie refresh + same-run retry ───────────────────────────────────────
+    cookie_refreshed = False
 
-        for future in as_completed(future_map):
-            case_meta = future_map[future]
-            title = case_meta["title"]
-            try:
-                raw_text = future.result()
-                if raw_text is None:
-                    logger.warning("─── %s\n    fetch failed (403 or empty)", title)
-                    fetch_failed_ids.add(case_meta["case_id"])
-                    errors += 1
-                else:
-                    logger.info("─── %s\n    PDF: %d chars", title, len(raw_text))
-                    fetch_results.append((case_meta, raw_text))
-            except Exception as exc:
-                logger.error("Unexpected fetch error for '%s': %s", title, exc)
-                errors += 1
-
-    # Cookie refresh check after all fetches
     if needs_cookie_refresh():
         _send_cookie_alert()
-        if _trigger_cookie_refresh():
+        cookie_refreshed = _trigger_cookie_refresh()
+        if cookie_refreshed:
             rebuild_session()
             reset_403_counter()
+
+    if cookie_refreshed and fetch_failed_ids:
+        retry_cases = [c for c in candidates if c["case_id"] in fetch_failed_ids]
+        logger.info(
+            "Retrying %d cases after cookie refresh (%ds cooldown) …",
+            len(retry_cases), RETRY_COOLDOWN_SEC,
+        )
+        time.sleep(RETRY_COOLDOWN_SEC)
+
+        # Subtract the error count for cases we're retrying
+        errors -= len(retry_cases)
+
+        retry_results, still_failed, retry_errors = _run_fetch_phase(retry_cases)
+        fetch_results.extend(retry_results)
+        fetch_failed_ids = still_failed
+        errors += retry_errors
+
+    # Un-mark cases that STILL failed so tomorrow's run picks them up
+    if fetch_failed_ids:
         unmark_seen(fetch_failed_ids)
         logger.info(
-            "%d fetch-failed cases un-marked for tomorrow's retry.",
+            "%d case(s) still failing — un-marked for tomorrow's retry.",
             len(fetch_failed_ids),
         )
-        fetch_failed_ids.clear()
 
     # ── Phase 2: Full-text pre-filter + Claude analysis ───────────────────────
     logger.info(

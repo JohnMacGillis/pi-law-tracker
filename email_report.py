@@ -160,15 +160,21 @@ def build_html(cases: list[dict], week_start: datetime, week_end: datetime) -> s
 
     if total == 0:
         body_html = (
-            '<p style="color:#555;font-size:14px;">'
+            '<p style="color:#555;font-size:14px;text-align:center;padding:30px 0;">'
             "No new personal injury damages decisions were identified this week."
             "</p>"
         )
     else:
-        # Group by province in display order
+        # Group by province in display order; sort each group newest-first
         by_prov: dict[str, list] = {}
         for c in cases:
             by_prov.setdefault(c.get("province", "Other"), []).append(c)
+
+        for prov in by_prov:
+            by_prov[prov].sort(
+                key=lambda c: c.get("decision_date") or c.get("date_fetched", ""),
+                reverse=True,
+            )
 
         sections = []
         for prov in PROVINCE_ORDER:
@@ -182,6 +188,8 @@ def build_html(cases: list[dict], week_start: datetime, week_end: datetime) -> s
         body_html = "".join(sections)
 
     plural = "cases" if total != 1 else "case"
+    prov_count = len(set(c.get("province", "") for c in cases)) if cases else 0
+    prov_note  = f" across {prov_count} province{'s' if prov_count != 1 else ''}" if prov_count > 1 else ""
 
     return f"""<!DOCTYPE html>
 <html lang="en">
@@ -203,7 +211,8 @@ def build_html(cases: list[dict], week_start: datetime, week_end: datetime) -> s
         PI Damages Report
       </h1>
       <p style="margin:6px 0 0;font-size:13px;color:#9dafc8;">
-        {date_range} &nbsp;·&nbsp; <strong style="color:#e8edf5;">{total} new {plural}</strong>
+        {date_range} &nbsp;·&nbsp;
+        <strong style="color:#e8edf5;">{total} new {plural}{prov_note}</strong>
       </p>
     </div>
 

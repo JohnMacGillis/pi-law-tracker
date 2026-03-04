@@ -35,7 +35,7 @@ os.chdir(os.path.dirname(os.path.abspath(__file__)))
 from config import DATA_DIR, LOG_FILE, MAX_CASE_CHARS
 from database import ensure_data_dir, load_seen_ids, mark_seen, save_case, unmark_seen
 from case_fetcher import (
-    fetch_case_text, smart_truncate, close_browser,
+    fetch_case_text, smart_truncate, close_browser, warmup,
     needs_cookie_refresh, rebuild_session, reset_403_counter,
 )
 from case_analyzer import analyze_case
@@ -210,7 +210,10 @@ def run() -> None:
         logger.info("=" * 65)
         return
 
-    # ── Phase 1: Parallel PDF fetch (candidates only) ─────────────────────────
+    # ── Phase 1: Fetch case text ───────────────────────────────────────────────
+    # Warm up the browser session first — if CanLII shows a CAPTCHA the user
+    # can solve it in the visible browser window before fetching begins.
+    warmup()
     logger.info("Phase 1: fetching %d cases sequentially …", len(candidates))
 
     fetch_results, fetch_failed_ids, phase1_errors = _run_fetch_phase(candidates)

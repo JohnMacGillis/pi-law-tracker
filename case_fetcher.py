@@ -59,21 +59,18 @@ def _get_context():
 
     _pw = sync_playwright().start()
 
-    # Prefer real Google Chrome (perfect fingerprint) over bundled Chromium
+    # Prefer real Google Chrome (perfect fingerprint) over bundled Chromium.
+    # Window is NOT minimized — user must be able to see and solve any CAPTCHA.
     try:
         _browser = _pw.chromium.launch(
             channel="chrome",
             headless=False,
-            args=["--start-minimized"],
         )
         logger.info("Playwright: using real Chrome")
     except Exception:
         _browser = _pw.chromium.launch(
             headless=False,
-            args=[
-                "--start-minimized",
-                "--disable-blink-features=AutomationControlled",
-            ],
+            args=["--disable-blink-features=AutomationControlled"],
         )
         logger.info("Playwright: using bundled Chromium")
 
@@ -178,6 +175,62 @@ def _pause() -> None:
         if wait > 0:
             time.sleep(wait)
         _last_request_time = time.time()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Session warm-up
+# ─────────────────────────────────────────────────────────────────────────────
+
+def warmup() -> None:
+    """
+    Navigate to the CanLII home page to establish a DataDome session before
+    fetching any cases.
+
+    If DataDome shows a CAPTCHA, the browser window will be visible on screen.
+    Solve it manually — the run waits up to 2 minutes, checking every 5 seconds
+    until CanLII returns a 200.  Once the session is clean it is saved to disk
+    so future runs rarely need this.
+    """
+    ctx  = _get_context()
+    page = ctx.new_page()
+    try:
+        logger.info("Warming up — navigating to CanLII home page …")
+        resp   = page.goto("https://www.canlii.org/en/",
+                           wait_until="domcontentloaded", timeout=30_000)
+        status = resp.status if resp else 0
+
+        if status == 200:
+            logger.info("Session OK — CanLII home page loaded cleanly.")
+            _save_state()
+            return
+
+        # Non-200: likely a CAPTCHA or bot challenge page
+        logger.warning(
+            "CanLII returned HTTP %d — a CAPTCHA may be showing in the browser. "
+            "Please solve it now. Waiting up to 2 minutes …", status,
+        )
+        for _ in range(24):          # 24 × 5s = 2 minutes
+            time.sleep(5)
+            try:
+                resp   = page.goto("https://www.canlii.org/en/",
+                                   wait_until="domcontentloaded", timeout=15_000)
+                status = resp.status if resp else 0
+                if status == 200:
+                    logger.info("CAPTCHA solved — session is now clean.")
+                    _save_state()
+                    return
+            except Exception:
+                pass
+
+        logger.error(
+            "Could not establish a clean CanLII session after 2 minutes. "
+            "Case fetching will likely produce 403 errors. "
+            "Delete data/browser_state.json and run again to retry."
+        )
+    except Exception as exc:
+        logger.error("Warm-up error: %s", exc)
+    finally:
+        page.close()
 
 
 # ─────────────────────────────────────────────────────────────────────────────

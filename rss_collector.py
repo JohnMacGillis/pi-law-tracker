@@ -186,4 +186,4 @@ def fetch_new_cases(seen_ids: set) -> list[dict]:
         )
 
     logger.info("RSS collection complete — %d new case(s) found", len(new_cases))
-    return new_cases
+    return new_cases, feed_health

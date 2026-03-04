@@ -149,18 +149,21 @@ def run() -> None:
     logger.info("Known case IDs: %d", len(seen_ids))
 
     # ── Discovery: API (preferred) or RSS fallback ────────────────────────────
+    feed_health = []
     if api_collector.api_available():
         logger.info("Discovery: CanLII API")
         new_cases = api_collector.fetch_new_cases(seen_ids)
     else:
         logger.info("Discovery: RSS feeds (set CANLII_API_KEY in config.py for API)")
-        new_cases = rss_collector.fetch_new_cases(seen_ids)
+        new_cases, feed_health = rss_collector.fetch_new_cases(seen_ids)
 
     logger.info("New cases to evaluate: %d", len(new_cases))
 
     if not new_cases:
+        elapsed = (datetime.now() - start).seconds
         logger.info("Nothing new today. Run complete.")
         logger.info("=" * 65)
+        _send_daily_status(0, 0, 0, elapsed, feed_health)
         return
 
     # Mark all as seen immediately for crash safety.
@@ -308,13 +311,13 @@ def run() -> None:
     close_browser()
 
     # ── Daily status email ──────────────────────────────────────────────────
-    _send_daily_status(saved, skipped, errors, elapsed)
+    _send_daily_status(saved, skipped, errors, elapsed, feed_health)
 
 
 # ── Failure notification helpers ─────────────────────────────────────────────
 
 def _send_daily_status(saved: int, skipped: int, errors: int,
-                       elapsed: int) -> None:
+                       elapsed: int, feed_health: list[dict] | None = None) -> None:
     """Send a status email after every daily run — success or not."""
     try:
         from email_report import send_alert_email
@@ -343,9 +346,42 @@ def _send_daily_status(saved: int, skipped: int, errors: int,
                 f"<p>Evaluated: {skipped} &nbsp;|&nbsp; Errors: 0</p>"
             )
 
+        # Append RSS feed warnings if any feeds are unhealthy
+        feed_warnings = _build_feed_warning_html(feed_health)
+        if feed_warnings:
+            body += feed_warnings
+            # Escalate subject line if feeds are failing
+            if not subject.startswith("PI Law Tracker — ") or "error" not in subject.lower():
+                subject = subject.replace("daily run OK", "daily run OK, feed issues")
+
         send_alert_email(subject=subject, body=body)
     except Exception as exc:
         logger.warning("Could not send daily status email: %s", exc)
+
+
+def _build_feed_warning_html(feed_health: list[dict] | None) -> str:
+    """Build an HTML snippet listing any unhealthy RSS feeds."""
+    if not feed_health:
+        return ""
+
+    bad = [h for h in feed_health if not h["status"] == "OK"]
+    if not bad:
+        return ""
+
+    rows = ""
+    for h in bad:
+        rows += (
+            f"<tr><td style='padding:4px 8px;font-size:13px;'>{h['court']}</td>"
+            f"<td style='padding:4px 8px;font-size:13px;'>{h['status']}</td></tr>"
+        )
+
+    return (
+        f"<hr style='border:none;border-top:1px solid #e5e7eb;margin:16px 0;'>"
+        f"<p style='font-size:13px;font-weight:700;color:#dc2626;'>"
+        f"RSS Feed Issues ({len(bad)} feed{'s' if len(bad) != 1 else ''}):</p>"
+        f"<table cellpadding='0' cellspacing='0' border='0' "
+        f"style='font-family:Arial,sans-serif;'>{rows}</table>"
+    )
 
 
 def _send_crash_alert(error: Exception) -> None:

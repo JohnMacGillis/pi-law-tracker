@@ -2,12 +2,11 @@
 email_report.py
 Builds a professional HTML digest email and sends it via SendGrid.
 
-Layout:
-  - Dark-navy header (title + date range + case count)
-  - Cases grouped by province, each in a card with:
-      title (linked to CanLII), court, date, case-type badge,
-      AI summary, damages table, notes
-  - Footer with AI disclaimer
+Design principles:
+  - Table-based layout only (no divs for structure — email clients strip them)
+  - All CSS inline (no <style> blocks — Gmail strips them)
+  - Explicit widths, cellpadding, bgcolor on every container
+  - Tested for Outlook, Gmail, Apple Mail compatibility
 """
 
 import logging
@@ -39,13 +38,16 @@ PROVINCE_NAMES = {
 }
 
 CASE_TYPE_COLOURS = {
-    "MVA":          "#1a73e8",   # blue
-    "Slip and Fall":"#e67e00",   # orange
-    "Trip and Fall":"#e67e00",
-    "Other PI":     "#6b7280",   # grey
-    "LTD":          "#0b7c3e",   # green
-    "Class Action": "#7b1fa2",   # purple
+    "MVA":           "#2563eb",
+    "Slip and Fall": "#ea580c",
+    "Trip and Fall": "#ea580c",
+    "Other PI":      "#6b7280",
+    "LTD":           "#059669",
+    "Class Action":  "#7c3aed",
 }
+
+_FONT = "Arial,Helvetica,sans-serif"
+_SERIF = "Georgia,Times,'Times New Roman',serif"
 
 
 # ── HTML helpers ──────────────────────────────────────────────────────────────
@@ -54,23 +56,31 @@ def _badge(case_type: str) -> str:
     colour = CASE_TYPE_COLOURS.get(case_type, "#6b7280")
     label  = case_type or "PI"
     return (
-        f'<span style="display:inline-block;background:{colour};color:#fff;'
-        f'font-size:11px;font-weight:700;padding:3px 10px;border-radius:12px;'
-        f'letter-spacing:0.3px;">{label}</span>'
+        f'<table cellpadding="0" cellspacing="0" border="0">'
+        f'<tr><td style="background-color:{colour};color:#ffffff;font-size:11px;'
+        f'font-weight:700;padding:4px 14px;border-radius:20px;letter-spacing:0.4px;'
+        f'font-family:{_FONT};white-space:nowrap;mso-padding-alt:6px 14px;">'
+        f'{label}</td></tr></table>'
     )
 
 
-def _dmg_row(label: str, value: str) -> str:
+def _dmg_row(label: str, value: str, is_total: bool = False) -> str:
     if not value:
         return ""
-    is_total = "Total" in label
-    weight   = "700" if is_total else "400"
-    top_border = "border-top:1px solid #ddd;" if is_total else ""
+    border = 'border-top:2px solid #e5e7eb;' if is_total else 'border-top:1px solid #f3f4f6;'
+    lbl_wt = '700' if is_total else '400'
+    val_wt = '700' if is_total else '500'
+    lbl_cl = '#111827' if is_total else '#6b7280'
+    val_cl = '#111827'
+    val_sz = '14px' if is_total else '13px'
+    pad    = '10px' if is_total else '7px'
     return (
-        f'<tr style="{top_border}">'
-        f'<td style="padding:3px 12px 3px 0;color:#555;font-size:12px;">{label}</td>'
-        f'<td style="padding:3px 0;font-size:12px;font-weight:{weight};'
-        f'color:#1a1a1a;">{value}</td>'
+        f'<tr>'
+        f'<td style="{border}padding:{pad} 0 7px 0;font-size:13px;'
+        f'font-weight:{lbl_wt};color:{lbl_cl};font-family:{_FONT};">{label}</td>'
+        f'<td align="right" style="{border}padding:{pad} 0 7px 0;'
+        f'font-size:{val_sz};font-weight:{val_wt};color:{val_cl};'
+        f'font-family:{_FONT};">{value}</td>'
         f'</tr>'
     )
 
@@ -84,13 +94,17 @@ def _damages_table(case: dict) -> str:
         _dmg_row("Cost of Future Care",   case.get("cost_of_future_care")),
         _dmg_row("Special Damages",       case.get("special_damages")),
         _dmg_row("Aggravated / Punitive", case.get("aggravated_punitive")),
-        _dmg_row("<strong>Total</strong>", case.get("total_damages")),
+        _dmg_row("Total",                 case.get("total_damages"), is_total=True),
     ]))
     if not rows:
         return ""
     return (
-        f'<table cellpadding="0" cellspacing="0" style="margin-top:10px;'
-        f'border-collapse:collapse;width:100%;">{rows}</table>'
+        f'<table cellpadding="0" cellspacing="0" border="0" width="100%" '
+        f'style="margin-top:16px;">'
+        f'<tr><td colspan="2" style="padding:0 0 8px 0;font-size:10px;'
+        f'font-weight:700;color:#9ca3af;text-transform:uppercase;letter-spacing:1px;'
+        f'font-family:{_FONT};">Damages Awarded</td></tr>'
+        f'{rows}</table>'
     )
 
 
@@ -103,39 +117,66 @@ def _case_card(case: dict) -> str:
     summary = case.get("summary", "")
     notes   = case.get("notes", "")
 
-    summary_html = (
-        f'<p style="margin:10px 0 0;font-size:13px;color:#333;line-height:1.55;">'
-        f'{summary}</p>'
-    ) if summary else ""
+    summary_html = ""
+    if summary:
+        summary_html = (
+            f'<tr><td colspan="2" style="padding:14px 0 0 0;font-size:13px;'
+            f'color:#374151;line-height:1.7;font-family:{_SERIF};">'
+            f'{summary}</td></tr>'
+        )
 
-    notes_html = (
-        f'<p style="margin:8px 0 0;font-size:11px;color:#888;font-style:italic;">'
-        f'{notes}</p>'
-    ) if notes else ""
+    notes_html = ""
+    if notes:
+        notes_html = (
+            f'<tr><td colspan="2" style="padding:12px 0 0 0;">'
+            f'<table cellpadding="0" cellspacing="0" border="0" width="100%"><tr>'
+            f'<td style="background-color:#f9fafb;border-left:3px solid #d1d5db;'
+            f'padding:10px 14px;font-size:12px;color:#6b7280;line-height:1.55;'
+            f'font-style:italic;font-family:{_FONT};">{notes}</td>'
+            f'</tr></table></td></tr>'
+        )
+
+    damages_html = ""
+    dmg_table = _damages_table(case)
+    if dmg_table:
+        damages_html = f'<tr><td colspan="2" style="padding:0;">{dmg_table}</td></tr>'
 
     return f"""
-    <div style="background:#ffffff;border:1px solid #e0e0e0;border-radius:8px;
-                padding:16px 18px;margin-bottom:14px;">
-      <table width="100%" cellpadding="0" cellspacing="0">
-        <tr>
-          <td valign="top">
-            <a href="{url}"
-               style="font-size:14px;font-weight:700;color:#1a1a1a;text-decoration:none;">
-              {title}
-            </a>
-            <div style="font-size:11px;color:#777;margin-top:3px;">
-              {court}&nbsp;&bull;&nbsp;{date}
-            </div>
-          </td>
-          <td align="right" valign="top" style="white-space:nowrap;padding-left:12px;">
-            {_badge(ctype)}
-          </td>
-        </tr>
+    <tr><td style="padding:0 0 16px 0;">
+      <!--[if mso]><table cellpadding="0" cellspacing="0" border="0" width="100%"
+        style="border:1px solid #e5e7eb;"><tr><td style="padding:22px 26px;">
+      <![endif]-->
+      <!--[if !mso]><!-->
+      <table cellpadding="0" cellspacing="0" border="0" width="100%"
+             style="background-color:#ffffff;border:1px solid #e5e7eb;border-radius:12px;">
+        <tr><td style="padding:22px 26px;">
+      <!--<![endif]-->
+          <table cellpadding="0" cellspacing="0" border="0" width="100%">
+            <tr>
+              <td valign="top" style="padding:0;">
+                <a href="{url}"
+                   style="font-size:15px;font-weight:700;color:#111827;text-decoration:none;
+                          font-family:{_FONT};line-height:1.35;">{title}</a>
+                <table cellpadding="0" cellspacing="0" border="0" style="margin-top:6px;"><tr>
+                  <td style="font-size:12px;color:#9ca3af;font-family:{_FONT};
+                             white-space:nowrap;">{court}</td>
+                  <td style="font-size:12px;color:#d1d5db;padding:0 8px;
+                             font-family:{_FONT};">&bull;</td>
+                  <td style="font-size:12px;color:#9ca3af;font-family:{_FONT};
+                             white-space:nowrap;">{date}</td>
+                </tr></table>
+              </td>
+              <td align="right" valign="top" style="padding:0 0 0 16px;white-space:nowrap;">
+                {_badge(ctype)}
+              </td>
+            </tr>
+            {summary_html}
+            {damages_html}
+            {notes_html}
+          </table>
+        </td></tr>
       </table>
-      {summary_html}
-      {_damages_table(case)}
-      {notes_html}
-    </div>"""
+    </td></tr>"""
 
 
 def _province_section(province: str, cases: list[dict]) -> str:
@@ -144,11 +185,16 @@ def _province_section(province: str, cases: list[dict]) -> str:
     label = f"{count} case{'s' if count != 1 else ''}"
     cards = "".join(_case_card(c) for c in cases)
     return f"""
-    <h2 style="font-size:15px;font-weight:700;color:#1a1a1a;margin:28px 0 12px;
-               padding-bottom:7px;border-bottom:2px solid #1a73e8;">
-      {name}
-      <span style="font-size:12px;font-weight:400;color:#666;"> — {label}</span>
-    </h2>
+    <tr><td style="padding:28px 0 16px 0;">
+      <table cellpadding="0" cellspacing="0" border="0" width="100%">
+        <tr><td style="font-size:16px;font-weight:700;color:#111827;
+                       font-family:{_FONT};padding:0 0 12px 0;
+                       border-bottom:2px solid #2563eb;">
+          {name}<span style="font-size:13px;font-weight:400;color:#9ca3af;
+                             margin-left:10px;">{label}</span>
+        </td></tr>
+      </table>
+    </td></tr>
     {cards}"""
 
 
@@ -157,17 +203,17 @@ def _province_section(province: str, cases: list[dict]) -> str:
 def build_html(cases: list[dict], week_start: datetime, week_end: datetime) -> str:
     total      = len(cases)
     date_range = (
-        f"{week_start.strftime('%B %d')} – {week_end.strftime('%B %d, %Y')}"
+        f"{week_start.strftime('%B %d')} &ndash; {week_end.strftime('%B %d, %Y')}"
     )
 
     if total == 0:
         body_html = (
-            '<p style="color:#555;font-size:14px;text-align:center;padding:30px 0;">'
-            "No new personal injury, LTD, or class action decisions were identified this week."
-            "</p>"
+            '<tr><td style="padding:40px 0;text-align:center;font-size:14px;'
+            f'color:#9ca3af;font-family:{_FONT};">'
+            'No new personal injury, LTD, or class action decisions '
+            'were identified this week.</td></tr>'
         )
     else:
-        # Group by province in display order; sort each group newest-first
         by_prov: dict[str, list] = {}
         for c in cases:
             by_prov.setdefault(c.get("province", "Other"), []).append(c)
@@ -182,58 +228,125 @@ def build_html(cases: list[dict], week_start: datetime, week_end: datetime) -> s
         for prov in PROVINCE_ORDER:
             if prov in by_prov:
                 sections.append(_province_section(prov, by_prov[prov]))
-        # Any unexpected provinces at the end
         for prov, pcases in by_prov.items():
             if prov not in PROVINCE_ORDER:
                 sections.append(_province_section(prov, pcases))
 
         body_html = "".join(sections)
 
-    plural = "cases" if total != 1 else "case"
+    plural     = "cases" if total != 1 else "case"
     prov_count = len(set(c.get("province", "") for c in cases)) if cases else 0
-    prov_note  = f" across {prov_count} province{'s' if prov_count != 1 else ''}" if prov_count > 1 else ""
+    prov_note  = (f" across {prov_count} province{'s' if prov_count != 1 else ''}"
+                  if prov_count > 1 else "")
+
+    # Stats bar — counts by case type (only shown when >1 case)
+    type_counts: dict[str, int] = {}
+    for c in cases:
+        ct = c.get("case_type", "Other") or "Other"
+        type_counts[ct] = type_counts.get(ct, 0) + 1
+
+    stats_cells = ""
+    for ct in ["MVA", "Slip and Fall", "LTD", "Class Action", "Other PI"]:
+        if ct in type_counts:
+            colour = CASE_TYPE_COLOURS.get(ct, "#6b7280")
+            stats_cells += (
+                f'<td align="center" style="padding:0 16px;">'
+                f'<table cellpadding="0" cellspacing="0" border="0"><tr>'
+                f'<td align="center" style="font-size:24px;font-weight:700;color:#ffffff;'
+                f'font-family:{_FONT};line-height:1;">{type_counts[ct]}</td></tr><tr>'
+                f'<td align="center" style="font-size:10px;font-weight:600;color:{colour};'
+                f'text-transform:uppercase;letter-spacing:0.6px;padding-top:5px;'
+                f'font-family:{_FONT};">{ct}</td>'
+                f'</tr></table></td>'
+            )
+
+    stats_row = ""
+    if stats_cells and total > 1:
+        stats_row = (
+            f'<tr><td style="padding:22px 0 0 0;">'
+            f'<table cellpadding="0" cellspacing="0" border="0" align="center"><tr>'
+            f'{stats_cells}'
+            f'</tr></table></td></tr>'
+        )
 
     return f"""<!DOCTYPE html>
-<html lang="en">
+<html lang="en" xmlns="http://www.w3.org/1999/xhtml">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
   <title>{EMAIL_SUBJECT}</title>
+  <!--[if mso]>
+  <style>table,td {{font-family:Arial,Helvetica,sans-serif !important;}}</style>
+  <![endif]-->
 </head>
-<body style="margin:0;padding:0;background:#f0f2f5;
-             font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;">
+<body style="margin:0;padding:0;background-color:#f3f4f6;
+             font-family:{_FONT};-webkit-font-smoothing:antialiased;">
 
-  <div style="max-width:660px;margin:28px auto 40px;">
+  <!-- Outer wrapper -->
+  <table cellpadding="0" cellspacing="0" border="0" width="100%" bgcolor="#f3f4f6"
+         style="background-color:#f3f4f6;">
+    <tr><td align="center" style="padding:32px 16px 48px 16px;">
 
-    <!-- Header -->
-    <div style="background:#0f1b35;border-radius:10px 10px 0 0;padding:26px 30px;">
-      <p style="margin:0 0 4px;font-size:11px;font-weight:600;color:#7a8fb5;
-                letter-spacing:1px;text-transform:uppercase;">Weekly Digest</p>
-      <h1 style="margin:0;font-size:22px;font-weight:700;color:#ffffff;">
-        PI · LTD · Class Action Report
-      </h1>
-      <p style="margin:6px 0 0;font-size:13px;color:#9dafc8;">
-        {date_range} &nbsp;·&nbsp;
-        <strong style="color:#e8edf5;">{total} new {plural}{prov_note}</strong>
-      </p>
-    </div>
+      <!-- Inner container -->
+      <!--[if mso]><table cellpadding="0" cellspacing="0" border="0" width="640"
+        style="width:640px;"><tr><td>
+      <![endif]-->
+      <!--[if !mso]><!-->
+      <table cellpadding="0" cellspacing="0" border="0" width="640"
+             style="max-width:640px;width:100%;border-radius:16px;overflow:hidden;
+                    box-shadow:0 1px 3px rgba(0,0,0,0.08),0 4px 20px rgba(0,0,0,0.04);">
+      <!--<![endif]-->
 
-    <!-- Body -->
-    <div style="background:#f0f2f5;padding:10px 30px 24px;">
-      {body_html}
-    </div>
+        <!-- HEADER -->
+        <tr><td bgcolor="#0f172a" style="background-color:#0f172a;padding:34px 36px 30px 36px;">
+          <table cellpadding="0" cellspacing="0" border="0" width="100%">
+            <tr><td style="font-size:11px;font-weight:700;color:#64748b;
+                          letter-spacing:1.5px;text-transform:uppercase;padding:0 0 10px 0;
+                          font-family:{_FONT};">Weekly Digest</td></tr>
+            <tr><td style="font-size:26px;font-weight:700;color:#ffffff;line-height:1.2;
+                          padding:0 0 12px 0;font-family:{_FONT};">
+              PI &middot; LTD &middot; Class Action Report</td></tr>
+            <tr><td style="font-size:14px;color:#94a3b8;line-height:1.4;
+                          font-family:{_FONT};">
+              {date_range}
+              <span style="color:#475569;">&nbsp;&middot;&nbsp;</span>
+              <strong style="color:#e2e8f0;">{total} new {plural}{prov_note}</strong>
+            </td></tr>
+            {stats_row}
+          </table>
+        </td></tr>
 
-    <!-- Footer -->
-    <div style="background:#e4e7ec;border-radius:0 0 10px 10px;
-                padding:14px 30px;text-align:center;">
-      <p style="margin:0;font-size:11px;color:#8a94a6;line-height:1.5;">
-        Generated by PI Law Tracker &nbsp;·&nbsp; Cases sourced from CanLII<br>
-        <em>AI-generated summaries are for research purposes only and must be
-        verified against the original decision before reliance.</em>
-      </p>
-    </div>
+        <!-- BODY -->
+        <tr><td bgcolor="#f3f4f6" style="background-color:#f3f4f6;padding:8px 28px 32px 28px;">
+          <table cellpadding="0" cellspacing="0" border="0" width="100%">
+            {body_html}
+          </table>
+        </td></tr>
 
-  </div>
+        <!-- FOOTER -->
+        <tr><td bgcolor="#f8fafc" style="background-color:#f8fafc;
+                       border-top:1px solid #e5e7eb;padding:22px 36px;">
+          <table cellpadding="0" cellspacing="0" border="0" width="100%">
+            <tr><td align="center" style="font-size:11px;color:#9ca3af;line-height:1.7;
+                                          font-family:{_FONT};">
+              Generated by <strong style="color:#6b7280;">PI Law Tracker</strong>
+              <span style="color:#d1d5db;">&nbsp;&middot;&nbsp;</span>
+              Cases sourced from
+              <a href="https://www.canlii.org" style="color:#6b7280;text-decoration:none;">CanLII</a>
+              <br>
+              <em style="color:#9ca3af;">AI-generated summaries are for research purposes
+              only and must be verified against the original decision before reliance.</em>
+            </td></tr>
+          </table>
+        </td></tr>
+
+      </table>
+      <!--[if mso]></td></tr></table><![endif]-->
+
+    </td></tr>
+  </table>
+
 </body>
 </html>"""
 
@@ -249,20 +362,29 @@ def send_alert_email(subject: str, body: str) -> bool:
     html = f"""<!DOCTYPE html>
 <html lang="en">
 <head><meta charset="UTF-8"></head>
-<body style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;
-             background:#f0f2f5;margin:0;padding:0;">
-  <div style="max-width:560px;margin:28px auto;background:#fff;border:1px solid #ddd;
-              border-radius:8px;overflow:hidden;">
-    <div style="background:#b91c1c;padding:18px 24px;">
-      <h2 style="margin:0;color:#fff;font-size:17px;">PI Law Tracker — Alert</h2>
-    </div>
-    <div style="padding:20px 24px;font-size:14px;color:#333;line-height:1.6;">
-      {body}
-    </div>
-    <div style="background:#f8f8f8;padding:10px 24px;font-size:11px;color:#888;">
-      Sent automatically by PI Law Tracker
-    </div>
-  </div>
+<body style="font-family:{_FONT};background:#f3f4f6;margin:0;padding:0;">
+  <table cellpadding="0" cellspacing="0" border="0" width="100%" bgcolor="#f3f4f6">
+    <tr><td align="center" style="padding:32px 16px;">
+      <table cellpadding="0" cellspacing="0" border="0" width="560"
+             style="max-width:560px;width:100%;border-radius:12px;overflow:hidden;
+                    box-shadow:0 1px 3px rgba(0,0,0,0.08);">
+        <tr><td bgcolor="#dc2626" style="background-color:#dc2626;padding:22px 28px;">
+          <table cellpadding="0" cellspacing="0" border="0"><tr>
+            <td style="font-size:18px;font-weight:700;color:#ffffff;
+                       font-family:{_FONT};">PI Law Tracker &mdash; Alert</td>
+          </tr></table>
+        </td></tr>
+        <tr><td bgcolor="#ffffff" style="background-color:#ffffff;
+                       padding:24px 28px;font-size:14px;color:#374151;line-height:1.65;
+                       font-family:{_FONT};">{body}</td></tr>
+        <tr><td bgcolor="#f9fafb" style="background-color:#f9fafb;
+                       border-top:1px solid #e5e7eb;padding:14px 28px;
+                       font-size:11px;color:#9ca3af;font-family:{_FONT};">
+          Sent automatically by PI Law Tracker
+        </td></tr>
+      </table>
+    </td></tr>
+  </table>
 </body>
 </html>"""
 

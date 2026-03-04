@@ -109,6 +109,16 @@ Relevant case types:
     • Aggregate damages awarded to a plaintiff class
     • Product liability, mass tort, or LTD class proceedings
 
+IMPORTANT classification rule — case_type priority:
+  • If the underlying injury arose from a MOTOR VEHICLE ACCIDENT, COLLISION,
+    or any type of car/truck/motorcycle crash, ALWAYS classify as "MVA" —
+    even if the case also involves an insurance dispute, accident benefits,
+    disability claim, or bad faith against an insurer.
+  • Only classify as "LTD" when the dispute is purely about long-term
+    disability insurance benefits with NO underlying motor vehicle accident.
+  • The presence of an insurer as a party does NOT make a case LTD.
+    Most MVA cases involve insurance — they are still MVA cases.
+
 Return ONLY this JSON object (fill null where information is not present):
 
 {{

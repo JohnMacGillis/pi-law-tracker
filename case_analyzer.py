@@ -159,28 +159,39 @@ def analyze_case(text: str, title: str, court: str = "", province: str = "") -> 
             return None
     except anthropic.APIStatusError as exc:
         if exc.status_code == 529:
-            # 529 = Anthropic servers overloaded — wait 60s and retry once
-            logger.warning(
-                "    Anthropic API overloaded (529) for '%s' — waiting 60s then retrying …",
-                title,
-            )
-            time.sleep(60)
-            _last_call_time = 0.0
-            try:
-                message = _client.messages.create(
-                    model=CLAUDE_MODEL,
-                    max_tokens=1024,
-                    system=_SYSTEM,
-                    messages=[{"role": "user", "content": prompt}],
+            # 529 = Anthropic servers overloaded — exponential backoff, 3 attempts
+            for attempt, wait in enumerate([60, 120, 240], 1):
+                logger.warning(
+                    "    529 overloaded for '%s' — waiting %ds (attempt %d/3) …",
+                    title, wait, attempt,
                 )
-                raw    = message.content[0].text.strip()
-                result = json.loads(raw)
-                result.setdefault("damages", {})
-                _last_call_time = time.time()
-                return result
-            except Exception as retry_exc:
-                logger.error("    529 retry also failed for '%s': %s", title, retry_exc)
-                return None
+                time.sleep(wait)
+                _last_call_time = 0.0
+                try:
+                    message = _client.messages.create(
+                        model=CLAUDE_MODEL,
+                        max_tokens=1024,
+                        system=_SYSTEM,
+                        messages=[{"role": "user", "content": prompt}],
+                    )
+                    raw    = message.content[0].text.strip()
+                    result = json.loads(raw)
+                    result.setdefault("damages", {})
+                    _last_call_time = time.time()
+                    return result
+                except anthropic.APIStatusError as inner:
+                    if inner.status_code == 529:
+                        continue   # still overloaded — try next backoff
+                    logger.error(
+                        "    API error %d on 529 retry for '%s': %s",
+                        inner.status_code, title, inner,
+                    )
+                    return None
+                except Exception as retry_exc:
+                    logger.error("    529 retry failed for '%s': %s", title, retry_exc)
+                    return None
+            logger.error("    529 retries exhausted for '%s'", title)
+            return None
         logger.error("Anthropic API error %d for '%s': %s", exc.status_code, title, exc)
         return None
     except anthropic.APIError as exc:

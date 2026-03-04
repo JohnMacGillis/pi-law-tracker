@@ -27,6 +27,67 @@ from config import REQUEST_DELAY_SECONDS, DATA_DIR
 
 logger = logging.getLogger(__name__)
 
+# ── Device profiles — rotated each run to look like different users ───────────
+# Each profile is (user_agent, viewport_width, viewport_height, timezone)
+_DEVICE_PROFILES = [
+    # Windows 10/11 — Chrome 122, 1080p
+    (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/122.0.0.0 Safari/537.36",
+        1920, 1080, "America/Halifax",
+    ),
+    # Windows 10/11 — Chrome 124, 1440p
+    (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/124.0.0.0 Safari/537.36",
+        2560, 1440, "America/Toronto",
+    ),
+    # Windows 10/11 — Chrome 120, 1366×768 (very common laptop size)
+    (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/120.0.0.0 Safari/537.36",
+        1366, 768, "America/Halifax",
+    ),
+    # Windows 10/11 — Chrome 126, 1536×864
+    (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/126.0.0.0 Safari/537.36",
+        1536, 864, "America/Moncton",
+    ),
+    # macOS — Chrome 123, 1440×900 (MacBook Pro 15")
+    (
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/123.0.0.0 Safari/537.36",
+        1440, 900, "America/Toronto",
+    ),
+    # macOS — Chrome 125, 1920×1080 (external monitor)
+    (
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/125.0.0.0 Safari/537.36",
+        1920, 1080, "America/Halifax",
+    ),
+    # macOS — Chrome 121, 2560×1600 (MacBook Pro 16" Retina)
+    (
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/121.0.0.0 Safari/537.36",
+        2560, 1600, "America/Halifax",
+    ),
+    # Windows 10/11 — Chrome 128, 1280×800
+    (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/128.0.0.0 Safari/537.36",
+        1280, 800, "America/Moncton",
+    ),
+]
+
 # ── Rate limiter (thread-safe) ────────────────────────────────────────────────
 _request_lock      = threading.Lock()
 _last_request_time = 0.0
@@ -74,17 +135,16 @@ def _get_context():
         )
         logger.info("Playwright: using bundled Chromium")
 
+    ua, vp_w, vp_h, tz = random.choice(_DEVICE_PROFILES)
+    logger.info("Device profile: %dx%d  tz=%s  ua=…%s", vp_w, vp_h, tz, ua[-40:])
+
     state = _STATE_FILE if os.path.exists(_STATE_FILE) else None
     _context = _browser.new_context(
         storage_state=state,
-        viewport={"width": 1920, "height": 1080},
+        viewport={"width": vp_w, "height": vp_h},
         locale="en-CA",
-        timezone_id="America/Halifax",
-        user_agent=(
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/120.0.0.0 Safari/537.36"
-        ),
+        timezone_id=tz,
+        user_agent=ua,
     )
 
     # Remove the webdriver flag that bot-detection looks for

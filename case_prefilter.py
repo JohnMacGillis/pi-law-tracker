@@ -88,6 +88,38 @@ _HIGH_CONFIDENCE = [
     "common issues trial",
     "class members",
 
+    # Wrongful death / fatal injury claims
+    "wrongful death",
+    "fatal injuries",
+    "fatal accident",
+    "loss of dependency",
+    "dependency claim",
+    "fatal injury",
+    "death of the plaintiff",
+    "deceased plaintiff",
+
+    # Medical malpractice / professional negligence
+    "medical malpractice",
+    "surgical error",
+    "failure to diagnose",
+    "misdiagnosis",
+    "medical negligence",
+    "hospital negligence",
+    "nursing negligence",
+    "informed consent",       # almost always medical context in PI
+
+    # Product liability
+    "product liability",
+    "products liability",
+    "defective product",
+    "manufacturer's liability",
+    "manufacturing defect",
+    "design defect",
+
+    # Dog / animal attacks
+    "dog bite",
+    "animal attack",
+
     # Common Canadian PI phrasing
     "motor vehicle",          # civil context covered — criminal caught by exclusions
     "injuries sustained",
@@ -107,7 +139,7 @@ _HIGH_CONFIDENCE = [
 
 # ── Tier 2: SUPPORTING keywords ───────────────────────────────────────────────
 # These appear in many civil cases, not just PI.
-# Require 3+ to pass (individually too broad).
+# Require 1+ to pass (RSS summaries are short; Claude handles false positives).
 
 _SUPPORTING = [
     "general damages",
@@ -155,8 +187,9 @@ _EXCLUSION = [
     "criminal negligence causing",  # more specific than plain "criminal negligence"
     "manslaughter",
     "indictment",
-    "criminal conviction",
-    # NOTE: removed " sentence ", "crown counsel", "crown attorney", " parole ",
+    # NOTE: removed "criminal conviction" — a civil PI case against a drunk driver
+    # may reference the defendant's conviction.  Also removed " sentence ",
+    # "crown counsel", "crown attorney", " parole ",
     # "impaired driving", "dangerous driving" — these can all appear in civil PI
     # cases (e.g. plaintiff sues drunk driver; government as defendant).
 
@@ -213,7 +246,9 @@ _EXCLUSION = [
 ]
 
 # Thresholds
-_SUPPORTING_THRESHOLD = 2   # need this many tier-2 keywords if no tier-1
+# RSS summaries are short — even 1 supporting keyword in a civil case
+# is enough reason to download the full text and let Claude decide.
+_SUPPORTING_THRESHOLD = 1
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -303,5 +338,5 @@ def prequalify(text: str, title: str = "") -> tuple[bool, str]:
 
     return False, (
         f"no high-confidence keyword; only {len(found)}/{_SUPPORTING_THRESHOLD} "
-        f"supporting keywords — likely not PI"
+        f"supporting keywords — likely not PI/LTD/class action"
     )

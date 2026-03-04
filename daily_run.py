@@ -25,7 +25,6 @@ Cookie refresh:
 
 import logging
 import os
-import subprocess
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -37,7 +36,7 @@ os.chdir(os.path.dirname(os.path.abspath(__file__)))
 from config import DATA_DIR, LOG_FILE, MAX_CASE_CHARS
 from database import ensure_data_dir, load_seen_ids, mark_seen, save_case, unmark_seen
 from case_fetcher import (
-    fetch_case_text, smart_truncate,
+    fetch_case_text, smart_truncate, close_browser,
     needs_cookie_refresh, rebuild_session, reset_403_counter,
 )
 from case_analyzer import analyze_case
@@ -69,25 +68,22 @@ RETRY_COOLDOWN_SEC = 30    # Pause between cookie refresh and retry pass
 # ── Cookie refresh helpers ────────────────────────────────────────────────────
 
 def _trigger_cookie_refresh() -> bool:
+    """
+    Reset the Playwright browser session.  The next fetch will open a fresh
+    Chromium window — if DataDome shows a CAPTCHA, the user can solve it
+    in the minimized browser window that appears in the taskbar.
+    """
     logger.warning("=" * 65)
-    logger.warning("COOKIE REFRESH — opening Chrome to CanLII")
-    logger.warning("Solve the slider if prompted, then click OK.")
+    logger.warning("SESSION RESET — rebuilding Playwright browser session")
+    logger.warning("If a CAPTCHA appears in the browser, solve it to continue.")
     logger.warning("=" * 65)
     try:
-        result = subprocess.run(
-            [sys.executable, "refresh_cookies.py"],
-            timeout=300,
-        )
-        if result.returncode == 0:
-            logger.info("Cookie refresh completed successfully.")
-            return True
-        logger.error("refresh_cookies.py exited with code %d", result.returncode)
-        return False
-    except subprocess.TimeoutExpired:
-        logger.error("Cookie refresh timed out (5 min).")
-        return False
+        rebuild_session()
+        reset_403_counter()
+        logger.info("Browser session reset successfully.")
+        return True
     except Exception as exc:
-        logger.error("Cookie refresh error: %s", exc)
+        logger.error("Session reset error: %s", exc)
         return False
 
 
@@ -317,6 +313,9 @@ def run() -> None:
         elapsed, saved, skipped, errors,
     )
     logger.info("=" * 65)
+
+    # Close the browser and persist the session for tomorrow's run
+    close_browser()
 
 
 if __name__ == "__main__":

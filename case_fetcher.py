@@ -1,113 +1,115 @@
 """
 case_fetcher.py
-Fetches court decision text from CanLII as a PDF using a Chrome TLS fingerprint
-(curl_cffi) plus an exported DataDome session cookie.
+Fetches court decision text from CanLII using Playwright (real browser).
 
-Why PDF?  CanLII's HTML pages are behind DataDome's JS challenge, which blocks
-Python HTTP clients.  PDFs are served by the same CDN but the DataDome cookie
-obtained from a real Chrome session is accepted.
+Why Playwright instead of curl_cffi + exported cookies?
+  DataDome (CanLII's bot protection) detects the mismatch between HTTP-client
+  TLS fingerprints and browser session cookies.  Playwright runs actual
+  Chromium, which is indistinguishable from a real user visiting the site.
+  No cookie exports, no manual CAPTCHA — the browser maintains its own session
+  automatically and DataDome cookies accumulate naturally.
 
-Setup:
-  1. Run  refresh_cookies.py  to export your Chrome cookies to canlii_cookies.json
-  2. If a 403 recurs after several runs, re-run refresh_cookies.py
+First run (or after rebuild_session):
+  Chromium opens minimized.  If DataDome shows a CAPTCHA, solve it once in
+  the browser window — the session is then saved to data/browser_state.json
+  and reused on every subsequent run.
 """
 
-import json
 import logging
 import os
 import random
 import threading
 import time
 
-import fitz                           # PyMuPDF
-from curl_cffi import requests        # Chrome TLS fingerprint
+from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
 
-from config import REQUEST_DELAY_SECONDS
+from config import REQUEST_DELAY_SECONDS, DATA_DIR
 
 logger = logging.getLogger(__name__)
 
-# Thread-safe rate limiter — ensures requests to CanLII are always spaced
-# at least REQUEST_DELAY_SECONDS apart, even with parallel workers.
-_request_lock       = threading.Lock()
-_last_request_time  = 0.0
+# ── Rate limiter (thread-safe) ────────────────────────────────────────────────
+_request_lock      = threading.Lock()
+_last_request_time = 0.0
 
-# ── Cookie file ───────────────────────────────────────────────────────────────
-COOKIE_FILE = "canlii_cookies.json"
+# ── Persistent browser state (DataDome session survives between runs) ─────────
+_STATE_FILE = os.path.join(DATA_DIR, "browser_state.json")
 
-# ── 403 threshold — how many consecutive 403s before we flag for refresh ──────
+# ── Shared browser objects (one per process) ─────────────────────────────────
+_pw      = None
+_browser = None
+_context = None
+
+# ── 403 threshold (same interface as before — daily_run.py uses these) ────────
 _403_THRESHOLD    = 3
 _consecutive_403s = 0
 
-# ── Session (lazy-built) ──────────────────────────────────────────────────────
-_session = None
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Browser lifecycle
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _get_context():
+    """Return the shared Playwright browser context, creating it if needed."""
+    global _pw, _browser, _context
+
+    if _context is not None:
+        return _context
+
+    os.makedirs(DATA_DIR, exist_ok=True)
+
+    _pw      = sync_playwright().start()
+    _browser = _pw.chromium.launch(
+        headless=False,                     # Headed = much harder to detect
+        args=[
+            "--start-minimized",            # Stays in taskbar, not in focus
+            "--disable-blink-features=AutomationControlled",
+        ],
+    )
+
+    state = _STATE_FILE if os.path.exists(_STATE_FILE) else None
+    _context = _browser.new_context(
+        storage_state=state,
+        viewport={"width": 1920, "height": 1080},
+        locale="en-CA",
+        timezone_id="America/Halifax",
+    )
+
+    logger.info(
+        "Playwright started (session: %s)",
+        "loaded from disk" if state else "fresh — may need CAPTCHA on first visit",
+    )
+    return _context
+
+
+def _save_state() -> None:
+    """Persist the current browser session (cookies, localStorage) to disk."""
+    if _context is not None:
+        os.makedirs(DATA_DIR, exist_ok=True)
+        _context.storage_state(path=_STATE_FILE)
+        logger.debug("Browser state saved → %s", _STATE_FILE)
+
+
+def close_browser() -> None:
+    """Save session and close the browser.  Call once at the end of each run."""
+    global _pw, _browser, _context
+    if _context is not None:
+        _save_state()
+        _context.close()
+        _context = None
+    if _browser is not None:
+        _browser.close()
+        _browser = None
+    if _pw is not None:
+        _pw.stop()
+        _pw = None
+    logger.info("Browser closed and session saved.")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Session management
-# ─────────────────────────────────────────────────────────────────────────────
-
-def _build_session() -> "curl_cffi.requests.Session":
-    """Create a curl_cffi session that impersonates Chrome and loads cookies."""
-    s = requests.Session(impersonate="chrome120")
-
-    if not os.path.exists(COOKIE_FILE):
-        logger.warning(
-            "Cookie file not found (%s). "
-            "Run  python refresh_cookies.py  to create it.",
-            COOKIE_FILE,
-        )
-        return s
-
-    try:
-        with open(COOKIE_FILE, encoding="utf-8") as fh:
-            cookies = json.load(fh)
-
-        for c in cookies:
-            domain = c.get("domain", ".canlii.org")
-            if not domain.startswith("."):
-                domain = "." + domain
-            s.cookies.set(
-                c["name"], c["value"],
-                domain=domain,
-                path=c.get("path", "/"),
-            )
-
-        dd_present = any(c["name"] == "datadome" for c in cookies)
-        logger.info(
-            "Loaded %d cookies from %s  (datadome: %s)",
-            len(cookies), COOKIE_FILE, dd_present,
-        )
-
-    except Exception as exc:
-        logger.error("Failed to load cookies from %s: %s", COOKIE_FILE, exc)
-
-    return s
-
-
-def _get_session():
-    global _session
-    if _session is None:
-        _session = _build_session()
-    return _session
-
-
-def rebuild_session() -> None:
-    """
-    Reload cookies from canlii_cookies.json and reset the 403 counter.
-    Call this after refresh_cookies.py has updated the cookie file.
-    """
-    global _session, _consecutive_403s
-    _session          = _build_session()
-    _consecutive_403s = 0
-    logger.info("Session rebuilt with fresh cookies.")
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# 403 / cookie-refresh state
+# 403 / session-reset interface (called by daily_run.py)
 # ─────────────────────────────────────────────────────────────────────────────
 
 def needs_cookie_refresh() -> bool:
-    """Return True when consecutive 403s have hit the threshold."""
     return _consecutive_403s >= _403_THRESHOLD
 
 
@@ -116,21 +118,26 @@ def reset_403_counter() -> None:
     _consecutive_403s = 0
 
 
+def rebuild_session() -> None:
+    """
+    Close the browser and delete the saved session so the next fetch starts
+    completely fresh (new DataDome handshake).  May prompt for CAPTCHA.
+    """
+    global _consecutive_403s
+    close_browser()
+    if os.path.exists(_STATE_FILE):
+        os.remove(_STATE_FILE)
+        logger.info("Deleted saved browser state — will start fresh.")
+    _consecutive_403s = 0
+    logger.info("Session will be rebuilt on the next fetch.")
+
+
 # ─────────────────────────────────────────────────────────────────────────────
-# Fetching
+# Rate limiting
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _human_gap() -> float:
-    """
-    Return a delay that mimics natural human browsing behaviour.
-
-    Distribution (right-skewed, like real click patterns):
-      70%  —  short pause      REQUEST_DELAY to +7 s   (normal reading)
-      20%  —  medium pause    15–35 s                  (slight distraction)
-      10%  —  long pause      40–90 s                  (coffee, phone call)
-
-    Uniform mechanical delays are a strong bot signal. Variance is key.
-    """
+    """Right-skewed delay that mimics natural browsing (70/20/10 distribution)."""
     roll = random.random()
     if roll < 0.70:
         return random.uniform(REQUEST_DELAY_SECONDS, REQUEST_DELAY_SECONDS + 7)
@@ -141,10 +148,7 @@ def _human_gap() -> float:
 
 
 def _pause() -> None:
-    """
-    Thread-safe rate limiter.  Acquires a lock so parallel workers never
-    fire requests simultaneously, then waits a human-like random gap.
-    """
+    """Serialise requests — only one goes out at a time, with a human gap."""
     global _last_request_time
     with _request_lock:
         elapsed = time.time() - _last_request_time
@@ -155,94 +159,125 @@ def _pause() -> None:
         _last_request_time = time.time()
 
 
-def _case_url_to_pdf_url(url: str) -> str:
-    """Convert a CanLII case HTML URL to its PDF counterpart."""
+# ─────────────────────────────────────────────────────────────────────────────
+# Text extraction
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _extract_text(page) -> str | None:
+    """
+    Pull decision text from a rendered CanLII HTML page.
+    Tries known content selectors first; falls back to cleaned body text.
+    """
+    # CanLII wraps the decision body in one of these elements
+    for sel in ["#cas-content", ".cas-content", "#document-content",
+                ".document-content", "article", "main"]:
+        try:
+            el = page.query_selector(sel)
+            if el:
+                text = el.inner_text()
+                if len(text) > 200:
+                    return text.strip()
+        except Exception:
+            continue
+
+    # Fallback: strip nav / header / footer and return body text
+    try:
+        text = page.evaluate("""() => {
+            ['nav','header','footer','.navbar','.breadcrumb',
+             '.sidebar','.toc'].forEach(s => {
+                document.querySelectorAll(s).forEach(e => e.remove());
+            });
+            return document.body.innerText;
+        }""")
+        return text.strip() if len(text) > 200 else None
+    except Exception:
+        return None
+
+
+def _to_html_url(url: str) -> str:
+    """Return the HTML version of a CanLII URL (strip .pdf if present)."""
     u = url.rstrip("/")
-    # Strip any .html extension first
-    if u.lower().endswith(".html"):
-        u = u[:-5]
-    # If already .pdf, leave it
-    if not u.lower().endswith(".pdf"):
-        u += ".pdf"
+    if u.lower().endswith(".pdf"):
+        u = u[:-4]
+    if not u.lower().endswith(".html"):
+        u = u + ".html"
     return u
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Public fetch function
+# ─────────────────────────────────────────────────────────────────────────────
+
 def fetch_case_text(url: str) -> str | None:
     """
-    Download the PDF for `url` from CanLII and return its plain text.
-
-    Returns None on any error.  Updates the consecutive-403 counter so
-    daily_run.py can decide when to trigger a cookie refresh.
+    Navigate to the CanLII HTML decision page and return its plain text.
+    Returns None on any failure.
     """
     global _consecutive_403s
 
     if not url:
         return None
 
-    pdf_url = _case_url_to_pdf_url(url)
+    html_url = _to_html_url(url)
     _pause()
 
+    ctx  = _get_context()
+    page = ctx.new_page()
+
     try:
-        resp = _get_session().get(pdf_url, timeout=60)
+        resp   = page.goto(html_url, wait_until="domcontentloaded", timeout=45_000)
+        status = resp.status if resp else 0
 
-        if resp.status_code == 429:
-            retry_after = int(resp.headers.get("Retry-After", 60))
-            logger.warning("    429 from CanLII — waiting %ds then retrying …", retry_after)
-            time.sleep(retry_after)
-            _pause()
-            resp = _get_session().get(pdf_url, timeout=60)
-
-        if resp.status_code == 403:
+        if status == 403:
             _consecutive_403s += 1
             logger.warning(
-                "    403 Forbidden on %s  (consecutive: %d/%d)",
-                pdf_url, _consecutive_403s, _403_THRESHOLD,
-            )
-            if needs_cookie_refresh():
-                logger.warning(
-                    "    ── Cookie refresh threshold reached. "
-                    "Run  python refresh_cookies.py  or wait for auto-refresh."
-                )
-            return None
-
-        resp.raise_for_status()
-        _consecutive_403s = 0   # successful request resets the counter
-
-        if b"%PDF" not in resp.content[:10]:
-            logger.warning("    Response is not a PDF: %s", pdf_url)
-            return None
-
-        doc  = fitz.open(stream=resp.content, filetype="pdf")
-        text = "\n".join(page.get_text() for page in doc).strip()
-        doc.close()
-
-        if len(text) < 200:
-            logger.warning(
-                "    PDF too short (%d chars) — may be scanned image: %s",
-                len(text), pdf_url,
+                "    403 on %s  (consecutive: %d/%d)",
+                html_url, _consecutive_403s, _403_THRESHOLD,
             )
             return None
 
-        logger.info("    PDF: %d chars extracted from %s", len(text), pdf_url)
+        if status == 429:
+            retry_after = int((resp.headers or {}).get("retry-after", "60"))
+            logger.warning("    429 — waiting %ds then retrying …", retry_after)
+            time.sleep(retry_after)
+            _pause()
+            resp   = page.goto(html_url, wait_until="domcontentloaded", timeout=45_000)
+            status = resp.status if resp else 0
+            if status not in (200,):
+                return None
+
+        _consecutive_403s = 0
+
+        # Brief render pause — looks more human, lets JS settle
+        page.wait_for_timeout(random.randint(600, 1800))
+
+        text = _extract_text(page)
+
+        if text:
+            logger.info("    HTML: %d chars from %s", len(text), html_url)
+            _save_state()   # Persist updated cookies after a successful hit
+        else:
+            logger.warning("    No text extracted from %s", html_url)
+
         return text
 
-    except Exception as exc:
-        logger.error("    PDF fetch error for %s: %s", pdf_url, exc)
+    except PWTimeout:
+        logger.error("    Timeout fetching %s", html_url)
         return None
+    except Exception as exc:
+        logger.error("    Fetch error for %s: %s", html_url, exc)
+        return None
+    finally:
+        page.close()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Truncation helper
+# Truncation helper (unchanged)
 # ─────────────────────────────────────────────────────────────────────────────
 
 def smart_truncate(text: str, max_chars: int) -> str:
-    """
-    Trim `text` to `max_chars` while keeping the beginning (case intro / type
-    of claim) and the end (where the damages award usually appears).
-    """
     if len(text) <= max_chars:
         return text
-
     front = max_chars // 3
     back  = max_chars - front
     return (

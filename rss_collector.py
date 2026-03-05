@@ -11,9 +11,17 @@ import logging
 from datetime import datetime, timedelta
 
 import feedparser
+import requests
 
 from config import REQUEST_DELAY_SECONDS
 from courts import COURTS
+
+_RSS_TIMEOUT = 15  # seconds per feed request
+_RSS_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/131.0.0.0 Safari/537.36"
+)
 
 logger = logging.getLogger(__name__)
 
@@ -58,7 +66,15 @@ def fetch_new_cases(seen_ids: set) -> list[dict]:
         logger.info("Fetching RSS → %s", court["name"])
         court_new = 0
         try:
-            feed = feedparser.parse(court["rss"])
+            # Fetch with requests (reliable UA, timeout, error handling)
+            # then parse the XML with feedparser
+            resp = requests.get(
+                court["rss"],
+                headers={"User-Agent": _RSS_USER_AGENT},
+                timeout=_RSS_TIMEOUT,
+            )
+            resp.raise_for_status()
+            feed = feedparser.parse(resp.content)
 
             # feedparser sets bozo=True on any parse issue
             if feed.bozo:

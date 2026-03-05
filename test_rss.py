@@ -12,9 +12,16 @@ import time
 from datetime import datetime
 
 import feedparser
+import requests
 
 from courts import COURTS
 from config import REQUEST_DELAY_SECONDS
+
+_UA = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/131.0.0.0 Safari/537.36"
+)
 
 
 def _parse_date(entry) -> str:
@@ -43,7 +50,9 @@ def main():
         url  = court["rss"]
 
         try:
-            feed = feedparser.parse(url)
+            resp = requests.get(url, headers={"User-Agent": _UA}, timeout=15)
+            resp.raise_for_status()
+            feed = feedparser.parse(resp.content)
             count = len(feed.entries)
             total_entries += count
 
@@ -72,6 +81,11 @@ def main():
             print(f"      Entries: {count}  |  Oldest: {oldest}  |  Newest: {newest}  |  {status}")
             print()
 
+        except requests.RequestException as exc:
+            print(f"  {court['province']}  {name}")
+            print(f"      HTTP ERROR: {exc}")
+            print()
+            problem_count += 1
         except Exception as exc:
             print(f"  {court['province']}  {name}")
             print(f"      ERROR: {exc}")

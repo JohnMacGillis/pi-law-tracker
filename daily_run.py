@@ -346,12 +346,15 @@ def _send_daily_status(saved: int, skipped: int, errors: int,
                 f"<p>Evaluated: {skipped} &nbsp;|&nbsp; Errors: 0</p>"
             )
 
-        # Append RSS feed warnings if any feeds are unhealthy
-        feed_warnings = _build_feed_warning_html(feed_health)
-        if feed_warnings:
-            body += feed_warnings
-            # Escalate subject line if feeds are failing
-            if not subject.startswith("PI Law Tracker — ") or "error" not in subject.lower():
+        # Always append feed summary so user can see feeds are alive
+        feed_summary = _build_feed_summary_html(feed_health)
+        if feed_summary:
+            body += feed_summary
+
+        # Escalate subject if any feeds are unhealthy
+        if feed_health:
+            bad = [h for h in feed_health if h["status"] != "OK"]
+            if bad and "error" not in subject.lower():
                 subject = subject.replace("daily run OK", "daily run OK, feed issues")
 
         send_alert_email(subject=subject, body=body)
@@ -359,29 +362,39 @@ def _send_daily_status(saved: int, skipped: int, errors: int,
         logger.warning("Could not send daily status email: %s", exc)
 
 
-def _build_feed_warning_html(feed_health: list[dict] | None) -> str:
-    """Build an HTML snippet listing any unhealthy RSS feeds."""
+def _build_feed_summary_html(feed_health: list[dict] | None) -> str:
+    """Build an HTML snippet showing RSS feed status — always included."""
     if not feed_health:
         return ""
 
-    bad = [h for h in feed_health if not h["status"] == "OK"]
-    if not bad:
-        return ""
+    total_feeds  = len(feed_health)
+    total_entries = sum(h["total"] for h in feed_health)
+    ok_feeds     = [h for h in feed_health if h["status"] == "OK"]
+    bad_feeds    = [h for h in feed_health if h["status"] != "OK"]
 
-    rows = ""
-    for h in bad:
-        rows += (
-            f"<tr><td style='padding:4px 8px;font-size:13px;'>{h['court']}</td>"
-            f"<td style='padding:4px 8px;font-size:13px;'>{h['status']}</td></tr>"
+    html = (
+        f"<hr style='border:none;border-top:1px solid #e5e7eb;margin:16px 0;'>"
+        f"<p style='font-size:13px;color:#6b7280;'>"
+        f"RSS: {len(ok_feeds)}/{total_feeds} feeds OK"
+        f" &nbsp;&bull;&nbsp; {total_entries} entries polled</p>"
+    )
+
+    if bad_feeds:
+        rows = ""
+        for h in bad_feeds:
+            rows += (
+                f"<tr><td style='padding:4px 8px;font-size:13px;'>{h['court']}</td>"
+                f"<td style='padding:4px 8px;font-size:13px;color:#dc2626;'>"
+                f"{h['status']}</td></tr>"
+            )
+        html += (
+            f"<p style='font-size:13px;font-weight:700;color:#dc2626;margin-top:8px;'>"
+            f"Feed issues ({len(bad_feeds)}):</p>"
+            f"<table cellpadding='0' cellspacing='0' border='0' "
+            f"style='font-family:Arial,sans-serif;'>{rows}</table>"
         )
 
-    return (
-        f"<hr style='border:none;border-top:1px solid #e5e7eb;margin:16px 0;'>"
-        f"<p style='font-size:13px;font-weight:700;color:#dc2626;'>"
-        f"RSS Feed Issues ({len(bad)} feed{'s' if len(bad) != 1 else ''}):</p>"
-        f"<table cellpadding='0' cellspacing='0' border='0' "
-        f"style='font-family:Arial,sans-serif;'>{rows}</table>"
-    )
+    return html
 
 
 def _send_crash_alert(error: Exception) -> None:

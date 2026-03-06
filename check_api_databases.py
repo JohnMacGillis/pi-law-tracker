@@ -23,6 +23,8 @@ print(f"\n  {len(databases)} databases found\n")
 print(f"  {'DB ID':<12} {'Jurisdiction':<6} Name")
 print(f"  {'─'*12} {'─'*6} {'─'*50}")
 
-for db in sorted(databases, key=lambda d: d.get("jurisdiction", {}).get("id", "")):
-    jur = db.get("jurisdiction", {}).get("id", "?")
-    print(f"  {db['databaseId']:<12} {jur:<6} {db['name']}")
+for db in sorted(databases, key=lambda d: str(d.get("jurisdiction", ""))):
+    jur = db.get("jurisdiction", "?")
+    if isinstance(jur, dict):
+        jur = jur.get("id", "?")
+    print(f"  {db['databaseId']:<12} {str(jur):<6} {db['name']}")

@@ -55,7 +55,7 @@ COURTS = [
     # ── Newfoundland & Labrador ───────────────────────────────────────────────
     {
         "province":  "NL",
-        "db_id":     "nlsc",
+        "db_id":     "nlsctd",
         "name":      "Supreme Court of Newfoundland and Labrador",
         "rss":       "https://www.canlii.org/en/nl/nlsc/rss_new.xml",
     },

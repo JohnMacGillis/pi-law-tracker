@@ -333,6 +333,8 @@ def _parse_args():
                    help="Show what would be processed, don't fetch or analyze")
     p.add_argument("--no-email", action="store_true",
                    help="Save CSV only, skip sending email")
+    p.add_argument("--rerun", action="store_true",
+                   help="Re-analyze all cases, ignoring previous summaries")
     p.add_argument("--input", type=str, default=_INPUT_CSV,
                    help="Path to input CSV (default: data/class_actions.csv)")
     return p.parse_args()
@@ -344,6 +346,8 @@ def _date_in_range(date_str: str, cutoff_year: int) -> bool:
     """
     Check if a decision date is within range.
     Handles full dates ("2025-03-09"), year-only ("2025"), or empty.
+    For year-only dates, includes the year before cutoff to catch
+    boundary cases (e.g. Dec 2024 is within 365 days of Mar 2026).
     """
     d = date_str.strip()
     if not d:
@@ -352,9 +356,9 @@ def _date_in_range(date_str: str, cutoff_year: int) -> bool:
     if len(d) >= 10:
         cutoff_date = f"{cutoff_year}-01-01"
         return d >= cutoff_date
-    # Year only: just compare the year
+    # Year only: include cutoff_year - 1 since we don't know the month
     try:
-        return int(d[:4]) >= cutoff_year
+        return int(d[:4]) >= cutoff_year - 1
     except (ValueError, IndexError):
         return False
 
@@ -392,11 +396,17 @@ def main():
         dated = [c for c in dated if kw in c.get("title", "").lower()]
         print(f"  After keyword filter (\"{args.keyword}\"): {len(dated)}")
 
-    # Dedup against already-done
-    already_done = _load_already_done()
-    to_process = [c for c in dated if c.get("url", "") not in already_done]
-    if len(to_process) < len(dated):
-        print(f"  Already summarized:               {len(dated) - len(to_process)}")
+    # Dedup against already-done (unless --rerun)
+    if args.rerun:
+        to_process = dated
+        if os.path.exists(_SUMMARIES_CSV):
+            os.remove(_SUMMARIES_CSV)
+            print("  (--rerun: cleared previous summaries)")
+    else:
+        already_done = _load_already_done()
+        to_process = [c for c in dated if c.get("url", "") not in already_done]
+        if len(to_process) < len(dated):
+            print(f"  Already summarized:               {len(dated) - len(to_process)}")
 
     time_est, cost_est = _estimate(len(to_process))
 

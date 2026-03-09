@@ -145,7 +145,7 @@ def _search(query: str) -> list[dict]:
         if len(results) < batch:
             break
         offset += batch
-        time.sleep(4)
+        time.sleep(1)  # Light delay; 429 retry handles rate limits
 
     return all_results
 
@@ -185,11 +185,13 @@ def main():
 
     # Phase 2: Search
     raw_results = []
-    for q in queries:
+    for qi, q in enumerate(queries):
         print(f"  Searching: {q}")
         batch = _search(q)
         print(f"    → {len(batch)} results\n")
         raw_results.extend(batch)
+        if qi < len(queries) - 1:
+            time.sleep(2)  # Brief pause between queries
 
     if not raw_results:
         print("  No results found.")

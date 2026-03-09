@@ -106,21 +106,69 @@ def _search(query: str) -> list[dict]:
         if len(results) < batch:
             break
         offset += batch
-        time.sleep(2)
+        time.sleep(4)
 
     return all_results
 
 
 def _fetch_case_metadata(db_id: str, case_id: str) -> dict:
     """Fetch metadata for a single case — gets URL and decision date."""
-    resp = requests.get(
-        f"{_API_BASE}/caseBrowse/en/{db_id}/{case_id}/",
-        params={"api_key": CANLII_API_KEY},
-        timeout=15,
-    )
-    if resp.ok:
-        return resp.json()
+    try:
+        resp = requests.get(
+            f"{_API_BASE}/caseBrowse/en/{db_id}/{case_id}/",
+            params={"api_key": CANLII_API_KEY},
+            timeout=15,
+        )
+        if resp.status_code == 429:
+            time.sleep(30)
+            resp = requests.get(
+                f"{_API_BASE}/caseBrowse/en/{db_id}/{case_id}/",
+                params={"api_key": CANLII_API_KEY},
+                timeout=15,
+            )
+        if resp.ok:
+            return resp.json()
+    except Exception:
+        pass
     return {}
+
+
+def _url_from_citation(citation: str) -> str:
+    """
+    Construct a CanLII URL from a citation as fallback when metadata 404s.
+    e.g. "2025 ONSC 1234 (CanLII)" → https://www.canlii.org/en/on/onsc/doc/2025/2025onsc1234/2025onsc1234.html
+
+    Returns empty string if citation format is unrecognized.
+    """
+    # Province mapping for court codes
+    _PROV_MAP = {
+        "ab": "ab", "bc": "bc", "mb": "mb", "nb": "nb", "nl": "nl",
+        "ns": "ns", "on": "on", "pe": "pe", "qc": "qc", "sk": "sk",
+        "nt": "nt", "nu": "nu", "yk": "yk",
+        # Federal courts
+        "fc": "ca", "fca": "ca", "scc": "ca", "tcc": "ca",
+    }
+
+    # Parse "2025 ONSC 1234 (CanLII)" → year=2025, court=ONSC, num=1234
+    m = re.match(r"(\d{4})\s+(\w+)\s+(\d+)", citation.strip())
+    if not m:
+        return ""
+
+    year = m.group(1)
+    court = m.group(2).lower()
+    num = m.group(3)
+
+    # Derive province from court code
+    prov = None
+    for prefix, p in _PROV_MAP.items():
+        if court.startswith(prefix):
+            prov = p
+            break
+    if not prov:
+        return ""
+
+    case_slug = f"{year}{court}{num}"
+    return f"https://www.canlii.org/en/{prov}/{court}/doc/{year}/{case_slug}/{case_slug}.html"
 
 
 def main():
@@ -202,19 +250,34 @@ def main():
         print(f"  [{i}/{len(filtered)}] {title} …", end=" ", flush=True)
 
         if not db_id or not case_id:
-            print("skip (no db/case ID)")
+            # No API IDs — try building URL from citation
+            url = _url_from_citation(r["citation"])
+            if url:
+                results_with_urls.append({
+                    "title":         r["title"],
+                    "citation":      r["citation"],
+                    "decision_date": str(r.get("decision_year", "")),
+                    "url":           url,
+                })
+                print("OK (from citation)")
+            else:
+                print("skip (no IDs)")
             continue
 
         meta = _fetch_case_metadata(db_id, case_id)
         url = meta.get("url", "")
         decision_date = meta.get("decisionDate", "")
 
+        # Fallback: construct URL from citation if metadata 404'd
+        if not url:
+            url = _url_from_citation(r["citation"])
+
         if not url:
             print("skip (no URL)")
             continue
 
         # Ensure full URL
-        if url and not url.startswith("http"):
+        if not url.startswith("http"):
             url = f"https://www.canlii.org{url}"
 
         results_with_urls.append({
@@ -224,7 +287,7 @@ def main():
             "url":           url,
         })
         print("OK")
-        time.sleep(0.5)
+        time.sleep(2)
 
     # Sort newest first
     results_with_urls.sort(key=lambda r: r.get("decision_date", ""), reverse=True)

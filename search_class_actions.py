@@ -1,13 +1,11 @@
 """
 search_class_actions.py
-Search CanLII for class action cases from the last year.
+Search ALL of CanLII for "class action" cases from the last year
+using the full-text search API endpoint.
 
-Two-phase approach:
-  Phase 1 — API full-text search for class action keywords.
-            Fetches up to 10,000 results per query (sorted by relevance).
-  Phase 2 — Filter: year from citation + title must contain a class action term.
-            This removes the thousands of cases that merely *mention* "class action"
-            in passing (criminal cases, family law, labour, etc.).
+The search API doesn't return decisionDate, so we extract the year
+from the citation (e.g. "2025 ONSC 1234" → 2025). This is reliable
+for virtually all Canadian legal citations.
 
 Usage:
     python search_class_actions.py
@@ -27,52 +25,25 @@ from config import CANLII_API_KEY, DATA_DIR
 
 _API_BASE = "https://api.canlii.org/v1"
 
-# Fetch up to 10K per query — the API sorts by relevance so we need enough
-# depth to catch recent cases that may not rank highest.
-_MAX_PER_QUERY = 10_000
-
-# ── Title keywords ───────────────────────────────────────────────────────────
-# A case is only included if its TITLE contains one of these.
-# This filters out the thousands of cases that merely cite or mention
-# class actions in their body text.
-_TITLE_KEYWORDS = [
-    # English
-    "class action",
-    "class proceeding",
-    "class proc.",
-    "certification",
-    "representative plaintiff",
-    "settlement approval",
-    "common issues",
-    "aggregate damages",
-    "class member",
-    "opt out",
-    "opt-out",
-    # French
-    "recours collectif",
-    "action collective",
-    "autorisation d",      # autorisation d'exercer un recours collectif
-    "membres du groupe",
-    "règlement",           # settlement
-]
-
-
-def _title_is_class_action(title: str) -> bool:
-    """Check if a case title suggests it's actually a class action case."""
-    t = title.lower()
-    return any(kw in t for kw in _TITLE_KEYWORDS)
+# Cap pages — search returns by relevance, most relevant first.
+# 3000 is plenty: there aren't 3000 class action decisions per year.
+_MAX_RESULTS = 3_000
 
 
 def _year_from_citation(citation: str) -> int | None:
     """
     Extract the decision year from a Canadian legal citation.
+    Examples:
       "2025 ONSC 1234"  → 2025
       "2024 BCCA 567"   → 2024
+      "2023 SCC 12"     → 2023
       "[2024] 3 SCR 45" → 2024
     """
+    # Try "YYYY CourtCode" pattern first (most common)
     m = re.match(r"(\d{4})\s+\w+", citation.strip())
     if m:
         return int(m.group(1))
+    # Try "[YYYY]" pattern (older style)
     m = re.search(r"\[(\d{4})\]", citation)
     if m:
         return int(m.group(1))
@@ -82,13 +53,13 @@ def _year_from_citation(citation: str) -> int | None:
 def _search(query: str) -> list[dict]:
     """
     Full-text search across ALL CanLII databases.
-    Pages through results up to _MAX_PER_QUERY.
+    Pages through results up to _MAX_RESULTS.
     """
     all_results = []
     offset = 0
     batch = 100
 
-    while offset < _MAX_PER_QUERY:
+    while offset < _MAX_RESULTS:
         print(f"    Fetching results {offset + 1}–{offset + batch} …", flush=True)
 
         resp = requests.get(
@@ -115,17 +86,21 @@ def _search(query: str) -> list[dict]:
         total = data.get("totalResults", "?")
 
         if offset == 0:
-            print(f"    Total on CanLII: {total}")
+            print(f"    Total results on CanLII: {total}")
+            if isinstance(total, int) and total > _MAX_RESULTS:
+                print(f"    (capping fetch at {_MAX_RESULTS} — date filter applied after)")
 
         for r in results:
             case = r.get("case", r)
+
             citation = case.get("citation", "")
+            year = _year_from_citation(citation)
 
             all_results.append({
                 "title":         case.get("title", ""),
                 "citation":      citation,
-                "decision_year": _year_from_citation(citation),
-                "decision_date": case.get("decisionDate", ""),
+                "decision_year": year,
+                "decision_date": case.get("decisionDate", ""),  # often empty
                 "url":           case.get("url", ""),
             })
 
@@ -144,7 +119,11 @@ def main():
 
     cutoff_year = (datetime.now() - timedelta(days=365)).year
 
-    # Search queries — English and French variants
+    # Multiple search queries to catch all variants:
+    #   "class action"     — English standard term
+    #   "class proceeding" — used in Ontario Class Proceedings Act
+    #   "recours collectif" — French (Quebec)
+    #   "action collective" — French alternate
     queries = [
         '"class action"',
         '"class proceeding"',
@@ -153,39 +132,37 @@ def main():
     ]
 
     print("=" * 70)
-    print("  CanLII Class Action Search")
+    print("  CanLII Class Action Search — All Variants")
     print(f"  Queries: {', '.join(queries)}")
-    print(f"  Year filter: {cutoff_year}+")
-    print(f"  Title filter: must contain class action keywords")
+    print(f"  Filtering to decisions from {cutoff_year} or later")
     print("=" * 70)
     print()
 
-    # Phase 1: Search
-    raw_results = []
+    results = []
     for q in queries:
         print(f"  Searching: {q}")
         batch = _search(q)
         print(f"    → {len(batch)} results\n")
-        raw_results.extend(batch)
+        results.extend(batch)
 
-    if not raw_results:
+    if not results:
         print("  No results found. Check your API key and try again.")
         return
 
-    # Phase 2: Deduplicate + year filter + title filter
+    print(f"  Total raw results: {len(results)}")
+
+    # Deduplicate and filter by year from citation
     seen = set()
     unique = []
     no_year = 0
     too_old = 0
-    title_rejected = 0
 
-    for r in raw_results:
+    for r in results:
         key = r["url"] or r["citation"]
         if not key or key in seen:
             continue
         seen.add(key)
 
-        # Year filter
         year = r.get("decision_year")
         if year is None:
             no_year += 1
@@ -194,27 +171,18 @@ def main():
             too_old += 1
             continue
 
-        # Title filter — must actually BE a class action case
-        if not _title_is_class_action(r["title"]):
-            title_rejected += 1
-            continue
-
         unique.append(r)
 
-    deduped = len(raw_results) - len(seen)
-
-    print(f"  Raw results:             {len(raw_results)}")
-    print(f"  Duplicates removed:      {deduped}")
-    print(f"  No year in citation:     {no_year}")
-    print(f"  Older than {cutoff_year}:         {too_old}")
-    print(f"  Title not class action:  {title_rejected}")
+    print(f"  Duplicates removed:      {len(results) - len(seen)}")
+    print(f"  No year in citation:     {no_year} (excluded)")
+    print(f"  Older than {cutoff_year}:         {too_old} (excluded)")
     print(f"  ─────────────────────────────────")
-    print(f"  Class action cases:      {len(unique)}")
+    print(f"  Cases from last year:    {len(unique)}")
 
     # Sort newest first
     unique.sort(key=lambda r: r.get("decision_year", 0), reverse=True)
 
-    # Save to CSV
+    # Save to CSV — use citation year as decision_date fallback
     os.makedirs(DATA_DIR, exist_ok=True)
     out = os.path.join(DATA_DIR, "class_actions.csv")
     with open(out, "w", newline="", encoding="utf-8") as f:
@@ -223,6 +191,7 @@ def main():
         ])
         writer.writeheader()
         for r in unique:
+            # Use actual date if available, otherwise just the year
             date = r.get("decision_date", "").strip()
             if not date and r.get("decision_year"):
                 date = str(r["decision_year"])
@@ -237,6 +206,7 @@ def main():
     print(f"  Saved {len(unique)} cases → {out}")
     print(f"{'=' * 70}\n")
 
+    # Print first 30 for quick review
     for i, r in enumerate(unique[:30], 1):
         print(f"  {i:3d}. {r['title'][:80]}")
         print(f"       {r['citation']}")

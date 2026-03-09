@@ -100,16 +100,20 @@ def main():
         print("  No results found. Check your API key and try again.")
         return
 
-    # Deduplicate by URL (search can return the same case in multiple snippets)
+    # Deduplicate by URL and filter to last 365 days
     seen = set()
     unique = []
     for r in results:
         key = r["url"] or r["citation"]
         if key and key not in seen:
             seen.add(key)
+            # Drop cases older than our cutoff
+            d = r.get("decision_date", "")
+            if d and d < one_year_ago:
+                continue
             unique.append(r)
 
-    print(f"\n  {len(results)} raw results → {len(unique)} unique cases")
+    print(f"\n  {len(results)} raw results → {len(unique)} unique cases (after date filter)")
 
     # Save to CSV
     os.makedirs(DATA_DIR, exist_ok=True)

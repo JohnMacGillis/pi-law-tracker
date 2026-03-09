@@ -27,7 +27,7 @@ logger = logging.getLogger(__name__)
 
 _API_BASE     = "https://api.canlii.org/v1"
 _MAX_PER_COURT = 100   # Max cases to pull per court per run (API ceiling: 10,000)
-_LOOKBACK_DAYS = 2     # Fetch cases published in the last N days (handles weekends)
+_LOOKBACK_DAYS = 7     # Fetch cases published in the last N days (seen_ids prevents reprocessing)
 
 
 def api_available() -> bool:

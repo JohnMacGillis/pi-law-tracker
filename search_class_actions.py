@@ -187,71 +187,41 @@ def main():
         print(f" → {len(court_hits)} class action candidates")
         time.sleep(1)
 
-    print(f"\n  Total class action candidates: {len(candidates)}")
-    print(f"  Fetching metadata to check for settlement keywords …\n")
+    print(f"\n  Total class action cases found: {len(candidates)}")
+    print(f"  Fetching metadata (decision dates, keywords) …\n")
 
-    # Step 2: Fetch metadata for candidates, check for settlement keywords
-    results = []
+    # Step 2: Fetch metadata for all candidates
     for i, c in enumerate(candidates, 1):
-        print(f"  [{i}/{len(candidates)}] {c['title'][:70]} …", end=" ", flush=True)
+        print(f"  [{i}/{len(candidates)}] {c['title'][:70]}", flush=True)
 
         meta = _fetch_metadata(c["db_id"], c["case_id"])
         keywords = meta.get("keywords", [])
         if isinstance(keywords, str):
             keywords = [keywords]
 
-        decision_date = meta.get("decisionDate", "")
-
-        is_settlement = _is_settlement_related(c["title"], keywords)
-
-        if is_settlement:
-            c["decision_date"] = decision_date
-            c["keywords"] = "; ".join(keywords) if keywords else ""
-            results.append(c)
-            print("SETTLEMENT ✓")
-        else:
-            print("skip")
-
+        c["decision_date"] = meta.get("decisionDate", "")
+        c["keywords"] = "; ".join(keywords) if keywords else ""
         time.sleep(0.5)
 
-    # Step 3: Save results
-    print(f"\n{'=' * 70}")
-    print(f"  Found {len(results)} settlement approval cases")
-    print(f"{'=' * 70}\n")
-
-    if not results:
-        print("  No settlement approval cases found. Try broadening the search.")
-
-        # Still save all class action candidates to CSV for review
-        if candidates:
-            os.makedirs(DATA_DIR, exist_ok=True)
-            out = os.path.join(DATA_DIR, "class_action_all.csv")
-            with open(out, "w", newline="", encoding="utf-8") as f:
-                writer = csv.DictWriter(f, fieldnames=[
-                    "province", "court", "title", "citation", "url",
-                ])
-                writer.writeheader()
-                for c in candidates:
-                    writer.writerow({k: c[k] for k in writer.fieldnames})
-            print(f"  Saved all {len(candidates)} class action candidates → {out}")
-        return
-
+    # Step 3: Save ALL class action cases
     os.makedirs(DATA_DIR, exist_ok=True)
-    out = os.path.join(DATA_DIR, "class_action_settlements.csv")
+    out = os.path.join(DATA_DIR, "class_actions.csv")
     with open(out, "w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=[
             "province", "court", "title", "citation", "decision_date",
             "keywords", "url",
         ])
         writer.writeheader()
-        for r in results:
-            writer.writerow({k: r[k] for k in writer.fieldnames})
+        for c in candidates:
+            writer.writerow({k: c[k] for k in writer.fieldnames})
 
-    print(f"  Saved → {out}\n")
-    for r in results:
-        print(f"  [{r['province']}] {r['title']}")
-        print(f"        {r['citation']}  |  {r['decision_date']}")
-        print(f"        {r['url']}")
+    print(f"\n{'=' * 70}")
+    print(f"  Saved {len(candidates)} class action cases → {out}")
+    print(f"{'=' * 70}\n")
+
+    for c in candidates:
+        print(f"  [{c['province']}] {c['title']}")
+        print(f"        {c['citation']}  |  {c['decision_date']}")
         print()
 
 

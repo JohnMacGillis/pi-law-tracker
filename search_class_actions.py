@@ -87,7 +87,7 @@ _CLASS_ACTION_TITLE = [
 
 
 def _fetch_cases(db_id: str, published_after: str) -> list[dict]:
-    """Fetch up to 500 cases from one court published after the given date."""
+    """Fetch ALL cases from one court published after the given date (up to API max 10,000)."""
     all_cases = []
     offset = 0
     batch = 100
@@ -113,7 +113,7 @@ def _fetch_cases(db_id: str, published_after: str) -> list[dict]:
         cases = resp.json().get("cases", [])
         all_cases.extend(cases)
 
-        if len(cases) < batch or offset + batch >= 500:
+        if len(cases) < batch:
             break
         offset += batch
         time.sleep(0.5)

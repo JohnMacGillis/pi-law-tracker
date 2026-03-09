@@ -45,6 +45,10 @@ def _search(query: str, published_after: str) -> list[dict]:
             timeout=30,
         )
 
+        if resp.status_code == 429:
+            print(f"    Rate limited — waiting 30s …")
+            time.sleep(30)
+            continue
         if not resp.ok:
             print(f"    HTTP {resp.status_code}: {resp.text[:200]}")
             break
@@ -76,7 +80,7 @@ def _search(query: str, published_after: str) -> list[dict]:
         if len(results) < batch:
             break
         offset += batch
-        time.sleep(0.5)
+        time.sleep(2)
 
     return all_results
 

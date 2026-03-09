@@ -155,11 +155,16 @@ def main():
         print("  ERROR: Set CANLII_API_KEY in config.py first.")
         return
 
-    cutoff_year = (datetime.now() - timedelta(days=365)).year
+    # Use cutoff_year - 1 to catch cases at the boundary (e.g. a case
+    # decided in Dec 2024 whose citation reads "2024 ONSC …" but whose
+    # publication date is Jan 2025).  The analyzer will do the final
+    # precise date filtering.
+    cutoff_year = (datetime.now() - timedelta(days=365)).year - 1
 
     queries = [
         '"class action"',
         '"class proceeding"',
+        '"class proceedings"',
         '"recours collectif"',
         '"action collective"',
     ]
@@ -204,12 +209,24 @@ def main():
         seen.add(key)
 
         year = r.get("decision_year")
-        if year is None:
-            no_year += 1
-            continue
-        if year < cutoff_year:
+
+        # Include cases with unknown year (citation unparseable) — let the
+        # analyzer's AI decide.  Only exclude cases clearly older than cutoff.
+        if year is not None and year < cutoff_year:
             too_old += 1
             continue
+        if year is None:
+            no_year += 1
+            # Don't skip — include them with year-only date from case_id if possible
+            cid = r.get("case_id", "")
+            m = re.match(r"(\d{4})", cid)
+            if m:
+                fallback_year = int(m.group(1))
+                if fallback_year < cutoff_year:
+                    too_old += 1
+                    continue
+                year = fallback_year
+            # If still no year, include anyway — better to over-include
 
         # Build URL from db_id + case_id + jurisdiction map
         url = _build_url(r["db_id"], r["case_id"], db_map)
@@ -220,7 +237,7 @@ def main():
         results.append({
             "title":         r["title"],
             "citation":      r["citation"],
-            "decision_date": str(year),
+            "decision_date": str(year) if year else "",
             "url":           url,
         })
 

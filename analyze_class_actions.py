@@ -55,14 +55,14 @@ _INPUT_CSV      = os.path.join(DATA_DIR, "class_actions.csv")
 _SUMMARIES_CSV  = os.path.join(DATA_DIR, "class_action_summaries.csv")
 _SUMMARY_FIELDS = [
     "decision_date", "title", "citation", "province", "status",
-    "summary", "amount", "class_size", "url",
+    "summary", "amount", "class_size", "url", "is_class_action",
 ]
 
 
 # ── AI prompts ────────────────────────────────────────────────────────────────
 
 _SYSTEM = """You are a legal research assistant for a Canadian plaintiff-side law firm.
-Summarize class action court decisions in plain language.
+Analyze court decisions to determine if they are class action cases and summarize them.
 Respond ONLY with valid JSON — no explanation, no markdown code fences."""
 
 _USER_TEMPLATE = """Case title: {title}
@@ -73,11 +73,19 @@ Decision date: {decision_date}
 {text}
 ---END DECISION---
 
-Provide a plain-language summary of this class action decision.
+First, determine whether this decision is actually a CLASS ACTION case (i.e. a representative
+proceeding under class proceedings legislation, a motion for certification, a settlement
+approval in a class action, a common issues trial, or an appeal of any of the above).
+
+Cases that merely MENTION "class action" in passing, or are individual lawsuits, labour board
+certifications, workers' compensation appeals, human rights complaints, criminal cases,
+family law, landlord-tenant disputes, insurance rate hearings, or regulatory proceedings
+are NOT class actions.
 
 Return ONLY this JSON object:
 
 {{
+  "is_class_action": true | false,
   "summary": "<2-3 sentence plain-language summary: who sued whom, what the claim was about, and what the court decided. Include any dollar amounts awarded or settlement values if mentioned.>",
   "status": "certification granted" | "certification denied" | "settlement approved" | "common issues trial" | "appeal" | "procedural" | "other",
   "class_size": "<approximate number of class members if mentioned, or null>",
@@ -447,6 +455,7 @@ def main():
     print(f"  Phase 2: Summarizing {len(fetched)} cases …\n")
 
     summaries: list[dict] = []
+    skipped_count = 0
     for i, (case, text) in enumerate(fetched, 1):
         title = case.get("title", "?")[:70]
         print(f"  [{i}/{len(fetched)}] Analyzing: {title} …", end=" ", flush=True)
@@ -462,6 +471,8 @@ def main():
             print("FAILED")
             continue
 
+        is_ca = result.get("is_class_action", False)
+
         row = {
             "decision_date": case.get("decision_date", ""),
             "title":         case.get("title", ""),
@@ -472,17 +483,25 @@ def main():
             "summary":       result.get("summary", ""),
             "amount":        result.get("amount", "") or "",
             "class_size":    result.get("class_size", "") or "",
+            "is_class_action": "yes" if is_ca else "no",
         }
 
         _save_summary(row)
-        summaries.append(row)
 
         status = result.get("status", "?")
         amt = result.get("amount", "")
         tag = f"{status}, {amt}" if amt else status
-        print(f"done ({tag})")
 
-    print(f"\n  Summarized {len(summaries)} cases → {_SUMMARIES_CSV}")
+        if is_ca:
+            summaries.append(row)
+            print(f"done ({tag})")
+        else:
+            skipped_count += 1
+            print(f"SKIPPED — not a class action")
+
+    print(f"\n  Summarized {len(summaries)} class action cases → {_SUMMARIES_CSV}")
+    if skipped_count:
+        print(f"  Filtered out {skipped_count} non-class-action cases")
 
     if not summaries:
         print("  No summaries generated.\n")

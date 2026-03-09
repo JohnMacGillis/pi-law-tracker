@@ -334,9 +334,28 @@ def _parse_args():
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 
+def _date_in_range(date_str: str, cutoff_year: int) -> bool:
+    """
+    Check if a decision date is within range.
+    Handles full dates ("2025-03-09"), year-only ("2025"), or empty.
+    """
+    d = date_str.strip()
+    if not d:
+        return False
+    # Full date: compare as string (YYYY-MM-DD sorts correctly)
+    if len(d) >= 10:
+        cutoff_date = f"{cutoff_year}-01-01"
+        return d >= cutoff_date
+    # Year only: just compare the year
+    try:
+        return int(d[:4]) >= cutoff_year
+    except (ValueError, IndexError):
+        return False
+
+
 def main():
     args = _parse_args()
-    cutoff = (datetime.now() - timedelta(days=args.days)).strftime("%Y-%m-%d")
+    cutoff_year = (datetime.now() - timedelta(days=args.days)).year
 
     # ── Phase 0: Load and filter ──────────────────────────────────────────────
     if not os.path.exists(args.input):
@@ -349,9 +368,9 @@ def main():
 
     print(f"\n  Loaded {len(all_cases)} cases from {args.input}")
 
-    # Date filter
+    # Date filter — handles both "2025-03-09" and "2025" formats
     dated = [c for c in all_cases
-             if c.get("decision_date", "") >= cutoff]
+             if _date_in_range(c.get("decision_date", ""), cutoff_year)]
     print(f"  After date filter ({args.days} days):  {len(dated)}")
 
     # Province filter

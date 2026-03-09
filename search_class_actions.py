@@ -3,6 +3,10 @@ search_class_actions.py
 Search ALL of CanLII for "class action" cases from the last year
 using the full-text search API endpoint.
 
+The search API doesn't return decisionDate, so we extract the year
+from the citation (e.g. "2025 ONSC 1234" → 2025). This is reliable
+for virtually all Canadian legal citations.
+
 Usage:
     python search_class_actions.py
 
@@ -11,6 +15,7 @@ Outputs results to data/class_actions.csv
 
 import csv
 import os
+import re
 import time
 from datetime import datetime, timedelta
 
@@ -20,9 +25,29 @@ from config import CANLII_API_KEY, DATA_DIR
 
 _API_BASE = "https://api.canlii.org/v1"
 
-# Hard cap — the search API can return tens of thousands of results.
-# 10,000 is more than enough to capture all class action cases from one year.
-_MAX_RESULTS = 10_000
+# Cap pages — search returns by relevance, most relevant first.
+# 3000 is plenty: there aren't 3000 class action decisions per year.
+_MAX_RESULTS = 3_000
+
+
+def _year_from_citation(citation: str) -> int | None:
+    """
+    Extract the decision year from a Canadian legal citation.
+    Examples:
+      "2025 ONSC 1234"  → 2025
+      "2024 BCCA 567"   → 2024
+      "2023 SCC 12"     → 2023
+      "[2024] 3 SCR 45" → 2024
+    """
+    # Try "YYYY CourtCode" pattern first (most common)
+    m = re.match(r"(\d{4})\s+\w+", citation.strip())
+    if m:
+        return int(m.group(1))
+    # Try "[YYYY]" pattern (older style)
+    m = re.search(r"\[(\d{4})\]", citation)
+    if m:
+        return int(m.group(1))
+    return None
 
 
 def _search(query: str) -> list[dict]:
@@ -63,23 +88,20 @@ def _search(query: str) -> list[dict]:
         if offset == 0:
             print(f"    Total results on CanLII: {total}")
             if isinstance(total, int) and total > _MAX_RESULTS:
-                print(f"    (capping at {_MAX_RESULTS} — date filter applied after)")
+                print(f"    (capping fetch at {_MAX_RESULTS} — date filter applied after)")
 
         for r in results:
             case = r.get("case", r)
-            db_obj = case.get("databaseId", {})
-            db_id = db_obj if isinstance(db_obj, str) else db_obj.get("databaseId", "")
 
-            case_id_obj = case.get("caseId", {})
-            case_id = case_id_obj.get("en", "") if isinstance(case_id_obj, dict) else str(case_id_obj)
+            citation = case.get("citation", "")
+            year = _year_from_citation(citation)
 
             all_results.append({
                 "title":         case.get("title", ""),
-                "citation":      case.get("citation", ""),
-                "decision_date": case.get("decisionDate", ""),
+                "citation":      citation,
+                "decision_year": year,
+                "decision_date": case.get("decisionDate", ""),  # often empty
                 "url":           case.get("url", ""),
-                "db_id":         db_id,
-                "case_id":       case_id,
             })
 
         if len(results) < batch:
@@ -95,11 +117,12 @@ def main():
         print("  ERROR: Set CANLII_API_KEY in config.py first.")
         return
 
-    one_year_ago = (datetime.now() - timedelta(days=365)).strftime("%Y-%m-%d")
+    cutoff_year = (datetime.now() - timedelta(days=365)).year
 
     print("=" * 70)
     print('  CanLII Full-Text Search: "class action"')
-    print(f"  Filtering to decisions after: {one_year_ago}")
+    print(f"  Filtering to decisions from {cutoff_year} or later")
+    print(f"  Max results to fetch: {_MAX_RESULTS}")
     print("=" * 70)
     print()
 
@@ -111,12 +134,10 @@ def main():
 
     print(f"\n  Raw results fetched: {len(results)}")
 
-    # Deduplicate and filter to last 365 days
-    # IMPORTANT: only include cases WITH a valid date that falls within range.
-    # Cases with no date are excluded (we can't verify they're recent).
+    # Deduplicate and filter by year from citation
     seen = set()
     unique = []
-    no_date = 0
+    no_year = 0
     too_old = 0
 
     for r in results:
@@ -125,23 +146,26 @@ def main():
             continue
         seen.add(key)
 
-        d = r.get("decision_date", "").strip()
-        if not d:
-            no_date += 1
+        year = r.get("decision_year")
+        if year is None:
+            no_year += 1
             continue
-        if d < one_year_ago:
+        if year < cutoff_year:
             too_old += 1
             continue
 
         unique.append(r)
 
-    print(f"  Duplicates removed:  {len(results) - len(seen)}")
-    print(f"  No decision date:    {no_date} (excluded)")
-    print(f"  Older than 365 days: {too_old} (excluded)")
-    print(f"  ─────────────────────────────")
-    print(f"  Cases in last year:  {len(unique)}")
+    print(f"  Duplicates removed:      {len(results) - len(seen)}")
+    print(f"  No year in citation:     {no_year} (excluded)")
+    print(f"  Older than {cutoff_year}:         {too_old} (excluded)")
+    print(f"  ─────────────────────────────────")
+    print(f"  Cases from last year:    {len(unique)}")
 
-    # Save to CSV
+    # Sort newest first
+    unique.sort(key=lambda r: r.get("decision_year", 0), reverse=True)
+
+    # Save to CSV — use citation year as decision_date fallback
     os.makedirs(DATA_DIR, exist_ok=True)
     out = os.path.join(DATA_DIR, "class_actions.csv")
     with open(out, "w", newline="", encoding="utf-8") as f:
@@ -150,7 +174,16 @@ def main():
         ])
         writer.writeheader()
         for r in unique:
-            writer.writerow({k: r[k] for k in writer.fieldnames})
+            # Use actual date if available, otherwise just the year
+            date = r.get("decision_date", "").strip()
+            if not date and r.get("decision_year"):
+                date = str(r["decision_year"])
+            writer.writerow({
+                "title":         r["title"],
+                "citation":      r["citation"],
+                "decision_date": date,
+                "url":           r["url"],
+            })
 
     print(f"\n{'=' * 70}")
     print(f"  Saved {len(unique)} cases → {out}")
@@ -159,7 +192,7 @@ def main():
     # Print first 30 for quick review
     for i, r in enumerate(unique[:30], 1):
         print(f"  {i:3d}. {r['title'][:80]}")
-        print(f"       {r['citation']}  |  {r['decision_date']}")
+        print(f"       {r['citation']}")
         print()
 
     if len(unique) > 30:

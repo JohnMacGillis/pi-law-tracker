@@ -20,17 +20,21 @@ from config import CANLII_API_KEY, DATA_DIR
 
 _API_BASE = "https://api.canlii.org/v1"
 
+# Hard cap — the search API can return tens of thousands of results.
+# 10,000 is more than enough to capture all class action cases from one year.
+_MAX_RESULTS = 10_000
 
-def _search(query: str, published_after: str) -> list[dict]:
+
+def _search(query: str) -> list[dict]:
     """
     Full-text search across ALL CanLII databases.
-    Pages through every result (API max 100 per page).
+    Pages through results up to _MAX_RESULTS.
     """
     all_results = []
     offset = 0
     batch = 100
 
-    while True:
+    while offset < _MAX_RESULTS:
         print(f"    Fetching results {offset + 1}–{offset + batch} …", flush=True)
 
         resp = requests.get(
@@ -40,7 +44,6 @@ def _search(query: str, published_after: str) -> list[dict]:
                 "searchQuery": query,
                 "resultCount": batch,
                 "offset": offset,
-                "publishedAfter": published_after,
             },
             timeout=30,
         )
@@ -58,10 +61,12 @@ def _search(query: str, published_after: str) -> list[dict]:
         total = data.get("totalResults", "?")
 
         if offset == 0:
-            print(f"    Total results available: {total}")
+            print(f"    Total results on CanLII: {total}")
+            if isinstance(total, int) and total > _MAX_RESULTS:
+                print(f"    (capping at {_MAX_RESULTS} — date filter applied after)")
 
         for r in results:
-            case = r.get("case", r)  # search results may nest under "case"
+            case = r.get("case", r)
             db_obj = case.get("databaseId", {})
             db_id = db_obj if isinstance(db_obj, str) else db_obj.get("databaseId", "")
 
@@ -94,30 +99,47 @@ def main():
 
     print("=" * 70)
     print('  CanLII Full-Text Search: "class action"')
-    print(f"  Published after: {one_year_ago}")
+    print(f"  Filtering to decisions after: {one_year_ago}")
     print("=" * 70)
     print()
 
-    results = _search('"class action"', one_year_ago)
+    results = _search('"class action"')
 
     if not results:
         print("  No results found. Check your API key and try again.")
         return
 
-    # Deduplicate by URL and filter to last 365 days
+    print(f"\n  Raw results fetched: {len(results)}")
+
+    # Deduplicate and filter to last 365 days
+    # IMPORTANT: only include cases WITH a valid date that falls within range.
+    # Cases with no date are excluded (we can't verify they're recent).
     seen = set()
     unique = []
+    no_date = 0
+    too_old = 0
+
     for r in results:
         key = r["url"] or r["citation"]
-        if key and key not in seen:
-            seen.add(key)
-            # Drop cases older than our cutoff
-            d = r.get("decision_date", "")
-            if d and d < one_year_ago:
-                continue
-            unique.append(r)
+        if not key or key in seen:
+            continue
+        seen.add(key)
 
-    print(f"\n  {len(results)} raw results → {len(unique)} unique cases (after date filter)")
+        d = r.get("decision_date", "").strip()
+        if not d:
+            no_date += 1
+            continue
+        if d < one_year_ago:
+            too_old += 1
+            continue
+
+        unique.append(r)
+
+    print(f"  Duplicates removed:  {len(results) - len(seen)}")
+    print(f"  No decision date:    {no_date} (excluded)")
+    print(f"  Older than 365 days: {too_old} (excluded)")
+    print(f"  ─────────────────────────────")
+    print(f"  Cases in last year:  {len(unique)}")
 
     # Save to CSV
     os.makedirs(DATA_DIR, exist_ok=True)

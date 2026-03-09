@@ -1,13 +1,10 @@
 """
 search_class_actions.py
-Search ALL of CanLII for class action cases from 2025 and 2026.
+Search CanLII for class action cases from the last year.
 
-Two-phase approach:
-  Phase 1 — Full-text search for class action keywords (English + French).
-            Extracts databaseId + caseId from each result.
-  Phase 2 — For cases from the target years, fetches metadata via caseBrowse
-            to get the actual URL and decision date (the search API doesn't
-            return these).
+Phase 1 — Fetch the database list once to build db_id → jurisdiction mapping.
+Phase 2 — Full-text search for class action keywords (English + French).
+Phase 3 — Construct URLs from databaseId + caseId (no per-case metadata needed).
 
 Usage:
     python search_class_actions.py
@@ -26,18 +23,11 @@ import requests
 from config import CANLII_API_KEY, DATA_DIR
 
 _API_BASE = "https://api.canlii.org/v1"
-
-# Fetch up to 3K per query — after year filtering there will be far fewer.
 _MAX_PER_QUERY = 3_000
 
 
 def _year_from_citation(citation: str) -> int | None:
-    """
-    Extract the decision year from a Canadian legal citation.
-      "2025 ONSC 1234"  → 2025
-      "2024 BCCA 567"   → 2024
-      "[2024] 3 SCR 45" → 2024
-    """
+    """Extract decision year from citation: '2025 ONSC 1234' → 2025"""
     m = re.match(r"(\d{4})\s+\w+", citation.strip())
     if m:
         return int(m.group(1))
@@ -45,6 +35,58 @@ def _year_from_citation(citation: str) -> int | None:
     if m:
         return int(m.group(1))
     return None
+
+
+def _fetch_db_map() -> dict:
+    """
+    Fetch ALL databases from the caseBrowse list endpoint.
+    Returns a dict mapping databaseId → jurisdiction path.
+    e.g. {"onsc": "on", "bcca": "bc", "fct": "ca", "csc-scc": "ca"}
+    """
+    print("  Loading database → jurisdiction map …", end=" ", flush=True)
+    resp = requests.get(
+        f"{_API_BASE}/caseBrowse/en/",
+        params={"api_key": CANLII_API_KEY},
+        timeout=30,
+    )
+    if not resp.ok:
+        print(f"FAILED (HTTP {resp.status_code})")
+        return {}
+
+    db_map = {}
+    for db in resp.json().get("caseDatabases", []):
+        db_id = db.get("databaseId", "")
+        jur = db.get("jurisdiction", "")
+        # jurisdiction can be a string like "on" or a dict like {"jurisdiction": "on"}
+        if isinstance(jur, dict):
+            jur = jur.get("jurisdiction", "")
+        if db_id and jur:
+            db_map[db_id] = jur
+
+    print(f"OK ({len(db_map)} databases)")
+    return db_map
+
+
+def _build_url(db_id: str, case_id: str, db_map: dict) -> str:
+    """
+    Construct a CanLII URL from databaseId and caseId.
+    e.g. db_id="onsc", case_id="2025onsc1234"
+    → https://www.canlii.org/en/on/onsc/doc/2025/2025onsc1234/2025onsc1234.html
+    """
+    jur = db_map.get(db_id, "")
+    if not jur or not case_id:
+        return ""
+
+    # Extract year from case_id (first 4 chars are usually the year)
+    year_match = re.match(r"(\d{4})", case_id)
+    year = year_match.group(1) if year_match else ""
+    if not year:
+        return ""
+
+    return (
+        f"https://www.canlii.org/en/{jur}/{db_id}/doc/"
+        f"{year}/{case_id}/{case_id}.html"
+    )
 
 
 def _search(query: str) -> list[dict]:
@@ -84,14 +126,11 @@ def _search(query: str) -> list[dict]:
 
         for r in results:
             case = r.get("case", r)
-
             citation = case.get("citation", "")
 
-            # Extract databaseId
             db_obj = case.get("databaseId", {})
             db_id = db_obj if isinstance(db_obj, str) else db_obj.get("databaseId", "")
 
-            # Extract caseId
             case_id_obj = case.get("caseId", {})
             case_id = case_id_obj.get("en", "") if isinstance(case_id_obj, dict) else str(case_id_obj)
 
@@ -111,72 +150,11 @@ def _search(query: str) -> list[dict]:
     return all_results
 
 
-def _fetch_case_metadata(db_id: str, case_id: str) -> dict:
-    """Fetch metadata for a single case — gets URL and decision date."""
-    try:
-        resp = requests.get(
-            f"{_API_BASE}/caseBrowse/en/{db_id}/{case_id}/",
-            params={"api_key": CANLII_API_KEY},
-            timeout=15,
-        )
-        if resp.status_code == 429:
-            time.sleep(30)
-            resp = requests.get(
-                f"{_API_BASE}/caseBrowse/en/{db_id}/{case_id}/",
-                params={"api_key": CANLII_API_KEY},
-                timeout=15,
-            )
-        if resp.ok:
-            return resp.json()
-    except Exception:
-        pass
-    return {}
-
-
-def _url_from_citation(citation: str) -> str:
-    """
-    Construct a CanLII URL from a citation as fallback when metadata 404s.
-    e.g. "2025 ONSC 1234 (CanLII)" → https://www.canlii.org/en/on/onsc/doc/2025/2025onsc1234/2025onsc1234.html
-
-    Returns empty string if citation format is unrecognized.
-    """
-    # Province mapping for court codes
-    _PROV_MAP = {
-        "ab": "ab", "bc": "bc", "mb": "mb", "nb": "nb", "nl": "nl",
-        "ns": "ns", "on": "on", "pe": "pe", "qc": "qc", "sk": "sk",
-        "nt": "nt", "nu": "nu", "yk": "yk",
-        # Federal courts
-        "fc": "ca", "fca": "ca", "scc": "ca", "tcc": "ca",
-    }
-
-    # Parse "2025 ONSC 1234 (CanLII)" → year=2025, court=ONSC, num=1234
-    m = re.match(r"(\d{4})\s+(\w+)\s+(\d+)", citation.strip())
-    if not m:
-        return ""
-
-    year = m.group(1)
-    court = m.group(2).lower()
-    num = m.group(3)
-
-    # Derive province from court code
-    prov = None
-    for prefix, p in _PROV_MAP.items():
-        if court.startswith(prefix):
-            prov = p
-            break
-    if not prov:
-        return ""
-
-    case_slug = f"{year}{court}{num}"
-    return f"https://www.canlii.org/en/{prov}/{court}/doc/{year}/{case_slug}/{case_slug}.html"
-
-
 def main():
     if not CANLII_API_KEY or not CANLII_API_KEY.strip():
         print("  ERROR: Set CANLII_API_KEY in config.py first.")
         return
 
-    # Include all of 2025 and 2026
     cutoff_year = (datetime.now() - timedelta(days=365)).year
 
     queries = [
@@ -189,11 +167,18 @@ def main():
     print("=" * 70)
     print("  CanLII Class Action Search")
     print(f"  Queries: {', '.join(queries)}")
-    print(f"  Year filter: {cutoff_year}+  (includes {cutoff_year} and {cutoff_year + 1})")
+    print(f"  Year filter: {cutoff_year}+")
     print("=" * 70)
     print()
 
-    # ── Phase 1: Search ──────────────────────────────────────────────────────
+    # Phase 1: Get database → jurisdiction mapping (single API call)
+    db_map = _fetch_db_map()
+    if not db_map:
+        print("  ERROR: Could not load database list. Check API key.")
+        return
+    print()
+
+    # Phase 2: Search
     raw_results = []
     for q in queries:
         print(f"  Searching: {q}")
@@ -202,14 +187,15 @@ def main():
         raw_results.extend(batch)
 
     if not raw_results:
-        print("  No results found. Check your API key and try again.")
+        print("  No results found.")
         return
 
-    # Deduplicate and filter by year
+    # Deduplicate, filter by year, build URLs
     seen = set()
-    filtered = []
+    results = []
     no_year = 0
     too_old = 0
+    no_url = 0
 
     for r in raw_results:
         key = r["citation"]
@@ -225,72 +211,33 @@ def main():
             too_old += 1
             continue
 
-        filtered.append(r)
+        # Build URL from db_id + case_id + jurisdiction map
+        url = _build_url(r["db_id"], r["case_id"], db_map)
+        if not url:
+            no_url += 1
+            continue
+
+        results.append({
+            "title":         r["title"],
+            "citation":      r["citation"],
+            "decision_date": str(year),
+            "url":           url,
+        })
 
     print(f"  Total raw results:       {len(raw_results)}")
     print(f"  Duplicates removed:      {len(raw_results) - len(seen)}")
     print(f"  No year in citation:     {no_year}")
     print(f"  Older than {cutoff_year}:         {too_old}")
+    print(f"  Could not build URL:     {no_url}")
     print(f"  ─────────────────────────────────")
-    print(f"  Cases to look up:        {len(filtered)}")
+    print(f"  Cases saved:             {len(results)}")
 
-    if not filtered:
+    if not results:
         print("  Nothing to save.\n")
         return
 
-    # ── Phase 2: Fetch metadata (URL + date) for each case ───────────────────
-    print(f"\n  Fetching URLs and dates for {len(filtered)} cases …\n")
-
-    results_with_urls = []
-    for i, r in enumerate(filtered, 1):
-        title = r["title"][:65]
-        db_id = r["db_id"]
-        case_id = r["case_id"]
-
-        print(f"  [{i}/{len(filtered)}] {title} …", end=" ", flush=True)
-
-        if not db_id or not case_id:
-            # No API IDs — try building URL from citation
-            url = _url_from_citation(r["citation"])
-            if url:
-                results_with_urls.append({
-                    "title":         r["title"],
-                    "citation":      r["citation"],
-                    "decision_date": str(r.get("decision_year", "")),
-                    "url":           url,
-                })
-                print("OK (from citation)")
-            else:
-                print("skip (no IDs)")
-            continue
-
-        meta = _fetch_case_metadata(db_id, case_id)
-        url = meta.get("url", "")
-        decision_date = meta.get("decisionDate", "")
-
-        # Fallback: construct URL from citation if metadata 404'd
-        if not url:
-            url = _url_from_citation(r["citation"])
-
-        if not url:
-            print("skip (no URL)")
-            continue
-
-        # Ensure full URL
-        if not url.startswith("http"):
-            url = f"https://www.canlii.org{url}"
-
-        results_with_urls.append({
-            "title":         r["title"],
-            "citation":      r["citation"],
-            "decision_date": decision_date or str(r.get("decision_year", "")),
-            "url":           url,
-        })
-        print("OK")
-        time.sleep(2)
-
     # Sort newest first
-    results_with_urls.sort(key=lambda r: r.get("decision_date", ""), reverse=True)
+    results.sort(key=lambda r: r.get("decision_date", ""), reverse=True)
 
     # Save to CSV
     os.makedirs(DATA_DIR, exist_ok=True)
@@ -300,20 +247,20 @@ def main():
             "title", "citation", "decision_date", "url",
         ])
         writer.writeheader()
-        for r in results_with_urls:
+        for r in results:
             writer.writerow(r)
 
     print(f"\n{'=' * 70}")
-    print(f"  Saved {len(results_with_urls)} cases → {out}")
+    print(f"  Saved {len(results)} cases → {out}")
     print(f"{'=' * 70}\n")
 
-    for i, r in enumerate(results_with_urls[:30], 1):
+    for i, r in enumerate(results[:30], 1):
         print(f"  {i:3d}. {r['title'][:80]}")
-        print(f"       {r['citation']}  |  {r['decision_date']}")
+        print(f"       {r['citation']}  |  {r['url'][:60]}")
         print()
 
-    if len(results_with_urls) > 30:
-        print(f"  … and {len(results_with_urls) - 30} more (see {out})")
+    if len(results) > 30:
+        print(f"  … and {len(results) - 30} more (see {out})")
 
 
 if __name__ == "__main__":

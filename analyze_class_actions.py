@@ -321,8 +321,6 @@ def _parse_args():
                    help="Filter by province code, e.g. ON, BC, QC")
     p.add_argument("--keyword", type=str, default="",
                    help="Filter by keyword in title")
-    p.add_argument("--max", type=int, default=50,
-                   help="Max cases to process (default: 50)")
     p.add_argument("--dry-run", action="store_true",
                    help="Show what would be processed, don't fetch or analyze")
     p.add_argument("--no-email", action="store_true",
@@ -392,11 +390,9 @@ def main():
     if len(to_process) < len(dated):
         print(f"  Already summarized:               {len(dated) - len(to_process)}")
 
-    # Cap
-    to_process = to_process[:args.max]
     time_est, cost_est = _estimate(len(to_process))
 
-    print(f"\n  → {len(to_process)} cases to process (capped at --max {args.max})")
+    print(f"\n  → {len(to_process)} cases to process")
     print(f"    Estimated time: {time_est}  |  AI cost: {cost_est}")
 
     if not to_process:

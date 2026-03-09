@@ -163,7 +163,7 @@ def run() -> None:
         elapsed = (datetime.now() - start).seconds
         logger.info("Nothing new today. Run complete.")
         logger.info("=" * 65)
-        _send_daily_status(0, 0, 0, elapsed, feed_health)
+        _send_daily_status(0, 0, 0, elapsed, feed_health, {"discovered": 0})
         return
 
     # Mark all as seen immediately for crash safety.
@@ -174,6 +174,20 @@ def run() -> None:
     saved   = 0
     skipped = 0
     errors  = 0
+
+    # Pipeline stats for the daily email
+    stats = {
+        "discovered":     len(new_cases),
+        "title_rejected": 0,
+        "rss_rejected":   0,
+        "to_fetch":       0,
+        "fetch_ok":       0,
+        "fetch_failed":   0,
+        "kw_rejected":    0,
+        "sent_to_ai":     0,
+        "ai_not_pi":      0,
+        "ai_failed":      0,
+    }
 
     # ── Phase 0: Instant pre-filter (title + RSS summary) ─────────────────────
     # No network I/O — runs on all cases before any PDF is downloaded.
@@ -189,6 +203,7 @@ def run() -> None:
         if title_ok is False:
             logger.info("─── %s\n    Title: skipped — %s", title, title_reason)
             skipped += 1
+            stats["title_rejected"] += 1
             continue
 
         # RSS summary check — keyword scan on text already in the feed.
@@ -199,18 +214,22 @@ def run() -> None:
             if not is_candidate:
                 logger.info("─── %s\n    RSS: skipped — %s", title, reason)
                 skipped += 1
+                stats["rss_rejected"] += 1
                 continue
 
         candidates.append(case_meta)
 
+    stats["to_fetch"] = len(candidates)
     logger.info(
         "Phase 0 complete: %d/%d proceed to PDF download (%d skipped instantly)",
         len(candidates), len(new_cases), skipped,
     )
 
     if not candidates:
+        elapsed = (datetime.now() - start).seconds
         logger.info("No candidates after pre-filter. Run complete.")
         logger.info("=" * 65)
+        _send_daily_status(saved, skipped, errors, elapsed, feed_health, stats)
         return
 
     # ── Phase 1: Fetch case text ───────────────────────────────────────────────
@@ -257,6 +276,9 @@ def run() -> None:
         )
 
     # ── Phase 2: Full-text pre-filter + Claude analysis ───────────────────────
+    stats["fetch_ok"]     = len(fetch_results)
+    stats["fetch_failed"] = len(fetch_failed_ids)
+
     logger.info(
         "Phase 2: analysing %d fetched cases …", len(fetch_results)
     )
@@ -269,9 +291,11 @@ def run() -> None:
         if not is_candidate:
             logger.info("    [%s] Pre-filter: skipped — %s", title, reason)
             skipped += 1
+            stats["kw_rejected"] += 1
             continue
 
         logger.info("    [%s] Pre-filter: passed — %s", title, reason)
+        stats["sent_to_ai"] += 1
 
         text     = smart_truncate(raw_text, MAX_CASE_CHARS)
         analysis = analyze_case(
@@ -284,11 +308,13 @@ def run() -> None:
         if analysis is None:
             logger.warning("    [%s] Analysis failed — skipping", title)
             errors += 1
+            stats["ai_failed"] += 1
             continue
 
         if not analysis.get("is_relevant"):
             logger.info("    [%s] Not PI — skipping", title)
             skipped += 1
+            stats["ai_not_pi"] += 1
             continue
 
         save_case(case_meta, analysis)
@@ -311,40 +337,29 @@ def run() -> None:
     close_browser()
 
     # ── Daily status email ──────────────────────────────────────────────────
-    _send_daily_status(saved, skipped, errors, elapsed, feed_health)
+    _send_daily_status(saved, skipped, errors, elapsed, feed_health, stats)
 
 
 # ── Failure notification helpers ─────────────────────────────────────────────
 
 def _send_daily_status(saved: int, skipped: int, errors: int,
-                       elapsed: int, feed_health: list[dict] | None = None) -> None:
+                       elapsed: int, feed_health: list[dict] | None = None,
+                       stats: dict | None = None) -> None:
     """Send a status email after every daily run — success or not."""
     try:
         from email_report import send_alert_email
 
         if errors > 0:
             subject = f"PI Law Tracker — {errors} error(s) in daily run"
-            body = (
-                f"<p>The daily run finished in {elapsed}s with "
-                f"<strong>{errors} error(s)</strong>.</p>"
-                f"<p>Saved: {saved} &nbsp;|&nbsp; Skipped: {skipped} "
-                f"&nbsp;|&nbsp; Errors: {errors}</p>"
-                f"<p>Check the log file for details.</p>"
-            )
         elif saved > 0:
             subject = f"PI Law Tracker — {saved} new case(s) saved"
-            body = (
-                f"<p>Daily run completed in {elapsed}s.</p>"
-                f"<p>Saved: <strong>{saved}</strong> &nbsp;|&nbsp; "
-                f"Skipped: {skipped} &nbsp;|&nbsp; Errors: 0</p>"
-            )
         else:
             subject = "PI Law Tracker — daily run OK, nothing new"
-            body = (
-                f"<p>Daily run completed in {elapsed}s. "
-                f"No new PI cases today.</p>"
-                f"<p>Evaluated: {skipped} &nbsp;|&nbsp; Errors: 0</p>"
-            )
+
+        body = f"<p>Daily run completed in {elapsed}s.</p>"
+
+        # Pipeline breakdown — always included
+        body += _build_pipeline_html(saved, errors, stats)
 
         # Always append feed summary so user can see feeds are alive
         feed_summary = _build_feed_summary_html(feed_health)
@@ -360,6 +375,54 @@ def _send_daily_status(saved: int, skipped: int, errors: int,
         send_alert_email(subject=subject, body=body)
     except Exception as exc:
         logger.warning("Could not send daily status email: %s", exc)
+
+
+def _build_pipeline_html(saved: int, errors: int, stats: dict | None) -> str:
+    """Build an HTML table showing where cases were filtered at each stage."""
+    if not stats or not stats.get("discovered"):
+        return "<p style='font-size:13px;color:#6b7280;'>No new cases in API/RSS feeds.</p>"
+
+    s = stats
+    rows = [
+        ("Discovered in feeds",    s.get("discovered", 0)),
+        ("Rejected by title",      f"-{s.get('title_rejected', 0)}"),
+        ("Rejected by RSS keywords", f"-{s.get('rss_rejected', 0)}"),
+        ("Sent to PDF fetch",      s.get("to_fetch", 0)),
+        ("Fetch failed (403/timeout)", f"-{s.get('fetch_failed', 0)}"),
+        ("Fetched OK",             s.get("fetch_ok", 0)),
+        ("Rejected by keyword filter", f"-{s.get('kw_rejected', 0)}"),
+        ("Sent to AI",             s.get("sent_to_ai", 0)),
+        ("AI said not PI",         f"-{s.get('ai_not_pi', 0)}"),
+        ("AI failed",              f"-{s.get('ai_failed', 0)}"),
+    ]
+
+    html = (
+        "<table cellpadding='0' cellspacing='0' border='0' "
+        "style='font-family:Arial,sans-serif;margin:10px 0;'>"
+    )
+    for label, val in rows:
+        val_str = str(val)
+        # Skip zero-subtract rows to reduce noise
+        if val_str == "-0":
+            continue
+        color = "#dc2626" if val_str.startswith("-") else "#374151"
+        html += (
+            f"<tr>"
+            f"<td style='padding:3px 12px 3px 0;font-size:13px;color:#6b7280;'>{label}</td>"
+            f"<td style='padding:3px 0;font-size:13px;font-weight:600;color:{color};'>{val_str}</td>"
+            f"</tr>"
+        )
+    # Final row — saved
+    html += (
+        f"<tr>"
+        f"<td style='padding:6px 12px 3px 0;font-size:14px;font-weight:700;"
+        f"color:#111827;border-top:2px solid #e5e7eb;'>PI cases saved</td>"
+        f"<td style='padding:6px 0 3px 0;font-size:14px;font-weight:700;"
+        f"color:#059669;border-top:2px solid #e5e7eb;'>{saved}</td>"
+        f"</tr>"
+        f"</table>"
+    )
+    return html
 
 
 def _build_feed_summary_html(feed_health: list[dict] | None) -> str:

@@ -119,20 +119,37 @@ def main():
 
     cutoff_year = (datetime.now() - timedelta(days=365)).year
 
+    # Multiple search queries to catch all variants:
+    #   "class action"     — English standard term
+    #   "class proceeding" — used in Ontario Class Proceedings Act
+    #   "recours collectif" — French (Quebec)
+    #   "action collective" — French alternate
+    queries = [
+        '"class action"',
+        '"class proceeding"',
+        '"recours collectif"',
+        '"action collective"',
+    ]
+
     print("=" * 70)
-    print('  CanLII Full-Text Search: "class action"')
+    print("  CanLII Class Action Search — All Variants")
+    print(f"  Queries: {', '.join(queries)}")
     print(f"  Filtering to decisions from {cutoff_year} or later")
-    print(f"  Max results to fetch: {_MAX_RESULTS}")
     print("=" * 70)
     print()
 
-    results = _search('"class action"')
+    results = []
+    for q in queries:
+        print(f"  Searching: {q}")
+        batch = _search(q)
+        print(f"    → {len(batch)} results\n")
+        results.extend(batch)
 
     if not results:
         print("  No results found. Check your API key and try again.")
         return
 
-    print(f"\n  Raw results fetched: {len(results)}")
+    print(f"  Total raw results: {len(results)}")
 
     # Deduplicate and filter by year from citation
     seen = set()

@@ -17,6 +17,7 @@ Set  CANLII_API_KEY  in config.py.  If blank, daily_run.py falls back to RSS.
 import logging
 import re
 import time
+from datetime import datetime
 
 import requests
 
@@ -25,8 +26,9 @@ from courts import COURTS
 
 logger = logging.getLogger(__name__)
 
-_API_BASE     = "https://api.canlii.org/v1"
-_MAX_PER_COURT = 100   # Max cases to pull per court per run (API ceiling: 10,000)
+_API_BASE       = "https://api.canlii.org/v1"
+_MAX_PER_COURT  = 100   # Max cases to pull per court per run (API ceiling: 10,000)
+_EARLIEST_DATE  = "2026-03-09"  # Ignore cases before this date
 
 # Province code → CanLII jurisdiction path (used for URL construction)
 _PROVINCE_TO_JUR = {
@@ -107,7 +109,14 @@ def _fetch_court(db_id: str, province: str, court_name: str,
     results = []
     no_url = 0
     already_seen = 0
+    too_old = 0
     for c in cases_list:
+        # Client-side date filter — the API's publishedAfter param is unreliable
+        decision_date = c.get("decisionDate", "")
+        if decision_date and decision_date < _EARLIEST_DATE:
+            too_old += 1
+            continue
+
         # The list endpoint does NOT return 'url' — construct it from
         # databaseId + caseId + province jurisdiction mapping.
         case_id_str = _extract_case_id(c)
@@ -126,15 +135,15 @@ def _fetch_court(db_id: str, province: str, court_name: str,
             "url":            case_url,
             "province":       province,
             "court_name":     court_name,
-            "published_date": c.get("decisionDate", "Unknown"),
+            "published_date": decision_date or "Unknown",
             "citation":       c.get("citation", ""),
             "rss_summary":    "",
         })
 
     if no_url:
         logger.warning("    %s: %d case(s) skipped — could not construct URL", db_id, no_url)
-    logger.debug("    %s: %d returned, %d seen, %d no-url, %d new",
-                 db_id, len(cases_list), already_seen, no_url, len(results))
+    logger.debug("    %s: %d returned, %d old, %d seen, %d no-url, %d new",
+                 db_id, len(cases_list), too_old, already_seen, no_url, len(results))
 
     return results
 

@@ -17,8 +17,6 @@ Set  CANLII_API_KEY  in config.py.  If blank, daily_run.py falls back to RSS.
 import logging
 import re
 import time
-from datetime import datetime
-
 import requests
 
 from config import CANLII_API_KEY
@@ -28,7 +26,6 @@ logger = logging.getLogger(__name__)
 
 _API_BASE       = "https://api.canlii.org/v1"
 _MAX_PER_COURT  = 20    # Max cases to pull per court per run (enough for daily new cases)
-_CUTOFF_YEAR    = 2026  # Ignore cases with citation year before this
 
 # Province code → CanLII jurisdiction path (used for URL construction)
 _PROVINCE_TO_JUR = {
@@ -36,17 +33,6 @@ _PROVINCE_TO_JUR = {
     "NS": "ns", "NT": "nt", "NU": "nu", "ON": "on", "PE": "pe",
     "QC": "qc", "SK": "sk", "YT": "yt", "CA": "ca",
 }
-
-
-def _year_from_citation(citation: str) -> int | None:
-    """Extract decision year from citation: '2025 ONSC 1234' → 2025"""
-    m = re.match(r"(\d{4})\s+\w+", citation.strip())
-    if m:
-        return int(m.group(1))
-    m = re.search(r"\[(\d{4})\]", citation)
-    if m:
-        return int(m.group(1))
-    return None
 
 
 def api_available() -> bool:
@@ -120,15 +106,8 @@ def _fetch_court(db_id: str, province: str, court_name: str,
     results = []
     no_url = 0
     already_seen = 0
-    too_old = 0
     for c in cases_list:
-        # Filter by year extracted from citation (the list endpoint
-        # does NOT return decisionDate — only the per-case metadata does)
         citation = c.get("citation", "")
-        year = _year_from_citation(citation)
-        if year is not None and year < _CUTOFF_YEAR:
-            too_old += 1
-            continue
 
         # The list endpoint does NOT return 'url' — construct it from
         # databaseId + caseId + province jurisdiction mapping.
@@ -148,15 +127,15 @@ def _fetch_court(db_id: str, province: str, court_name: str,
             "url":            case_url,
             "province":       province,
             "court_name":     court_name,
-            "published_date": c.get("decisionDate", "") or str(year or "Unknown"),
+            "published_date": c.get("decisionDate", "") or "Unknown",
             "citation":       citation,
             "rss_summary":    "",
         })
 
     if no_url:
         logger.warning("    %s: %d case(s) skipped — could not construct URL", db_id, no_url)
-    logger.debug("    %s: %d returned, %d old, %d seen, %d no-url, %d new",
-                 db_id, len(cases_list), too_old, already_seen, no_url, len(results))
+    logger.debug("    %s: %d returned, %d seen, %d no-url, %d new",
+                 db_id, len(cases_list), already_seen, no_url, len(results))
 
     return results
 

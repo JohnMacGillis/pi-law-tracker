@@ -111,9 +111,9 @@ def _fetch_court(db_id: str, province: str, court_name: str,
     already_seen = 0
     too_old = 0
     for c in cases_list:
-        # Client-side date filter — the API's publishedAfter param is unreliable
+        # Client-side date filter — only include cases ON or AFTER the cutoff
         decision_date = c.get("decisionDate", "")
-        if decision_date and decision_date < _EARLIEST_DATE:
+        if not decision_date or decision_date < _EARLIEST_DATE:
             too_old += 1
             continue
 

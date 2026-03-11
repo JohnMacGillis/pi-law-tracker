@@ -85,10 +85,52 @@ _LEGISLATION_PI = [
     "automobile insurance act",
 ]
 
+# Neutral — common in ALL civil litigation, don't indicate PI or non-PI.
+# If a case ONLY cites these, it's inconclusive (could be PI).
+_LEGISLATION_NEUTRAL = [
+    "courts of justice act",
+    "rules of civil procedure",
+    "rules of court",
+    "limitations act",
+    "limitation of actions act",
+    "evidence act",
+    "canada evidence act",
+    "interpretation act",
+    "judicature act",
+    "court of appeal act",
+    "charter of rights",          # constitutional issues appear in any area
+    "constitutional act",
+    "official languages act",
+    "crown liability",
+    "proceedings against the crown",
+    "judicial review procedure",
+    "statutory powers procedure",
+    "class proceedings act",      # could be PI class action
+    "law and equity act",
+    "court order enforcement act",
+    "trustee act",
+    "health care costs recovery act",  # PI-adjacent
+]
+
+
+def _matches_list(title: str, legislation_list: list[str]) -> str | None:
+    """Return the first matching entry from the list, or None."""
+    for entry in legislation_list:
+        if entry in title:
+            return entry
+    return None
+
 
 def prequalify_legislation(cited_titles: list[str]) -> tuple[bool | None, str]:
     """
     Filter based on legislation cited by the case (from caseCitator API).
+
+    Logic:
+      1. No citator data         → inconclusive (pass through)
+      2. Cites EXCLUDE statute    → reject
+      3. Cites PI statute         → fast-track
+      4. ALL cited are NEUTRAL    → inconclusive (could be PI, proceed)
+      5. Cites unknown statutes   → reject (specialized area, not PI)
 
     Returns
     -------
@@ -99,19 +141,34 @@ def prequalify_legislation(cited_titles: list[str]) -> tuple[bool | None, str]:
     if not cited_titles:
         return None, "no cited legislation data"
 
-    # Check for exclusion legislation first
+    # 1. Check for exclusion legislation
     for leg in cited_titles:
-        for excl in _LEGISLATION_EXCLUDE:
-            if excl in leg:
-                return False, f"cites excluded legislation: '{leg}'"
+        match = _matches_list(leg, _LEGISLATION_EXCLUDE)
+        if match:
+            return False, f"cites excluded legislation: '{leg}'"
 
-    # Check for PI-relevant legislation
+    # 2. Check for PI-relevant legislation
     for leg in cited_titles:
-        for pi_leg in _LEGISLATION_PI:
-            if pi_leg in leg:
-                return True, f"cites PI legislation: '{leg}'"
+        match = _matches_list(leg, _LEGISLATION_PI)
+        if match:
+            return True, f"cites PI legislation: '{leg}'"
 
-    return None, f"cited {len(cited_titles)} statute(s), none decisive"
+    # 3. Check if ALL cited statutes are neutral (common civil procedure)
+    has_unknown = False
+    unknown_examples = []
+    for leg in cited_titles:
+        if not _matches_list(leg, _LEGISLATION_NEUTRAL):
+            has_unknown = True
+            unknown_examples.append(leg)
+
+    if not has_unknown:
+        return None, f"cited {len(cited_titles)} neutral statute(s) only — inconclusive"
+
+    # 4. Cites specialized (non-PI, non-neutral) statutes → reject
+    preview = unknown_examples[0][:60] if unknown_examples else "?"
+    if len(unknown_examples) > 1:
+        return False, f"cites non-PI legislation: '{preview}' (+{len(unknown_examples)-1} more)"
+    return False, f"cites non-PI legislation: '{preview}'"
 
 
 # ── Tier 1: HIGH-CONFIDENCE PI keywords ──────────────────────────────────────

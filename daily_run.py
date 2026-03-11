@@ -39,7 +39,7 @@ from case_fetcher import (
     needs_cookie_refresh, rebuild_session, reset_403_counter,
 )
 from case_analyzer import analyze_case
-from case_prefilter import prequalify, prequalify_title
+from case_prefilter import prequalify, prequalify_title, prequalify_legislation
 
 import api_collector
 import rss_collector
@@ -180,6 +180,8 @@ def run() -> None:
         "discovered":       len(new_cases),
         "title_rejected":   0,
         "rss_rejected":     0,
+        "citator_rejected": 0,
+        "citator_passed":   0,
         "to_fetch":         0,
         "fetch_ok":         0,
         "fetch_failed":     0,
@@ -231,7 +233,50 @@ def run() -> None:
         _send_daily_status(saved, skipped, errors, elapsed, feed_health, stats)
         return
 
+    # ── Phase 0.5: Legislation citator pre-filter (API only) ──────────────────
+    # Check what legislation each case cites — one API call per case.
+    # Now smarter: rejects cases that cite ANY non-PI, non-neutral statute
+    # (not just cases on the explicit exclude list).
+    if api_collector.api_available():
+        logger.info(
+            "Phase 0.5: checking cited legislation for %d cases …",
+            len(candidates),
+        )
+        citator_survivors: list[dict] = []
+        for case_meta in candidates:
+            title = case_meta["title"]
+            cited = api_collector.fetch_cited_legislations(case_meta["url"])
+            leg_ok, leg_reason = prequalify_legislation(cited)
+
+            if leg_ok is False:
+                logger.info("─── %s\n    Citator: skipped — %s", title, leg_reason)
+                skipped += 1
+                stats["citator_rejected"] += 1
+            elif leg_ok is True:
+                logger.info("─── %s\n    Citator: passed — %s", title, leg_reason)
+                stats["citator_passed"] += 1
+                citator_survivors.append(case_meta)
+            else:
+                # Inconclusive (no data or all neutral) — proceed
+                logger.debug("─── %s\n    Citator: %s", title, leg_reason)
+                citator_survivors.append(case_meta)
+
+            time.sleep(0.5)
+
+        candidates = citator_survivors
+        logger.info(
+            "Phase 0.5 complete: %d survive (%d rejected, %d fast-tracked)",
+            len(candidates), stats["citator_rejected"], stats["citator_passed"],
+        )
+
     stats["to_fetch"] = len(candidates)
+
+    if not candidates:
+        elapsed = (datetime.now() - start).seconds
+        logger.info("No candidates after citator filter. Run complete.")
+        logger.info("=" * 65)
+        _send_daily_status(saved, skipped, errors, elapsed, feed_health, stats)
+        return
 
     # ── Phase 1: Fetch case text ───────────────────────────────────────────────
     # Warm up the browser session first — if CanLII shows a CAPTCHA the user
@@ -388,6 +433,7 @@ def _build_pipeline_html(saved: int, errors: int, stats: dict | None) -> str:
         ("Discovered in feeds",    s.get("discovered", 0)),
         ("Rejected by title",      f"-{s.get('title_rejected', 0)}"),
         ("Rejected by RSS keywords", f"-{s.get('rss_rejected', 0)}"),
+        ("Rejected by cited legislation", f"-{s.get('citator_rejected', 0)}"),
         ("Sent to PDF fetch",      s.get("to_fetch", 0)),
         ("Fetch failed (403/timeout)", f"-{s.get('fetch_failed', 0)}"),
         ("Fetched OK",             s.get("fetch_ok", 0)),

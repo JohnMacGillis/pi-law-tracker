@@ -13,6 +13,13 @@ Two-tier matching strategy:
 
   EXCLUSION keywords: any match → hard reject regardless of other keywords.
 
+Legislation citator filter (API-only):
+  When the CanLII API key is available, the caseCitator endpoint can tell us
+  what legislation a case cites BEFORE downloading the PDF.  Cases citing
+  criminal, family, tax, or immigration statutes are rejected.  Cases citing
+  PI-relevant statutes (Highway Traffic Act, Occupiers' Liability, etc.)
+  are fast-tracked.
+
 Expected to eliminate ~75-85% of RSS entries (contract, criminal, family,
 administrative, regulatory, IP, tax, etc.).
 """
@@ -20,6 +27,91 @@ administrative, regulatory, IP, tax, etc.).
 import logging
 
 logger = logging.getLogger(__name__)
+
+
+# ── Legislation-based prefilter (uses caseCitator API) ────────────────────────
+# Checked BEFORE downloading the PDF — lightweight API call replaces heavy fetch.
+
+# If a case cites ANY of these → definitely not PI → skip PDF download
+_LEGISLATION_EXCLUDE = [
+    "criminal code",
+    "divorce act",
+    "income tax act",
+    "excise tax act",
+    "bankruptcy and insolvency act",
+    "companies' creditors arrangement act",
+    "immigration and refugee protection act",
+    "citizenship act",
+    "canada labour code",
+    "labour relations act",
+    "employment standards act",
+    "workplace safety and insurance act",
+    "workers compensation act",
+    "workers' compensation act",
+    "child, youth and family services act",
+    "child and family services act",
+    "youth criminal justice act",
+    "controlled drugs and substances act",
+    "cannabis act",
+    "corrections and conditional release act",
+    "extradition act",
+    "securities act",
+    "patent act",
+    "copyright act",
+    "trade-marks act",
+    "trademarks act",
+    "planning act",
+    "residential tenancies act",
+    "condominium act",
+    "construction act",
+    "municipal act",
+]
+
+# If a case cites ANY of these → strong PI signal → pass immediately
+_LEGISLATION_PI = [
+    "highway traffic act",
+    "traffic safety act",
+    "motor vehicle act",
+    "occupiers' liability act",
+    "occupiers liability act",
+    "negligence act",
+    "fatal accidents act",
+    "family law act",            # Part V dependant claims
+    "dog owners' liability act",
+    "dog owners liability act",
+    "consumer protection act",
+    "insurance act",
+    "insurance (vehicle) act",
+    "automobile insurance act",
+]
+
+
+def prequalify_legislation(cited_titles: list[str]) -> tuple[bool | None, str]:
+    """
+    Filter based on legislation cited by the case (from caseCitator API).
+
+    Returns
+    -------
+    (False, reason) → definitely not PI — skip PDF download
+    (True,  reason) → strong PI signal — proceed
+    (None,  reason) → inconclusive — fall through to title/keyword filters
+    """
+    if not cited_titles:
+        return None, "no cited legislation data"
+
+    # Check for exclusion legislation first
+    for leg in cited_titles:
+        for excl in _LEGISLATION_EXCLUDE:
+            if excl in leg:
+                return False, f"cites excluded legislation: '{leg}'"
+
+    # Check for PI-relevant legislation
+    for leg in cited_titles:
+        for pi_leg in _LEGISLATION_PI:
+            if pi_leg in leg:
+                return True, f"cites PI legislation: '{leg}'"
+
+    return None, f"cited {len(cited_titles)} statute(s), none decisive"
 
 
 # ── Tier 1: HIGH-CONFIDENCE PI keywords ──────────────────────────────────────

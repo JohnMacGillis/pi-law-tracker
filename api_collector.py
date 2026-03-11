@@ -131,6 +131,54 @@ def _fetch_court(db_id: str, province: str, court_name: str,
     return results
 
 
+def _extract_db_and_case(case_url: str) -> tuple[str, str]:
+    """
+    Extract (db_id, case_id) from a constructed CanLII URL.
+    e.g. ".../en/on/onsc/doc/2025/2025onsc1234/2025onsc1234.html"
+    → ("onsc", "2025onsc1234")
+    """
+    try:
+        parts = case_url.rstrip("/").replace(".html", "").split("/")
+        # URL: …/en/{jur}/{db_id}/doc/{year}/{case_id}/{case_id}.html
+        # parts[-1] = case_id, parts[-4] = db_id
+        return parts[-4], parts[-1]
+    except (IndexError, ValueError):
+        return "", ""
+
+
+def fetch_cited_legislations(case_url: str) -> list[str]:
+    """
+    Call the caseCitator API to get legislation titles cited by a case.
+    Returns a list of legislation title strings (lowercase).
+    """
+    db_id, case_id = _extract_db_and_case(case_url)
+    if not db_id or not case_id:
+        return []
+
+    url = f"{_API_BASE}/caseCitator/en/{db_id}/{case_id}/citedLegislations"
+    try:
+        resp = requests.get(
+            url,
+            params={"api_key": CANLII_API_KEY},
+            timeout=20,
+        )
+        if not resp.ok:
+            return []
+        data = resp.json()
+        titles = []
+        for leg in data.get("citedLegislations", []):
+            title = leg.get("title", "")
+            if not title:
+                # Sometimes nested under legislation object
+                leg_obj = leg.get("legislation", {})
+                title = leg_obj.get("title", "")
+            if title:
+                titles.append(title.lower())
+        return titles
+    except Exception:
+        return []
+
+
 def fetch_new_cases(seen_ids: set) -> list[dict]:
     """
     Poll every monitored court via the CanLII API and return unseen cases

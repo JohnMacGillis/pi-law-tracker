@@ -27,7 +27,7 @@ from courts import COURTS
 logger = logging.getLogger(__name__)
 
 _API_BASE       = "https://api.canlii.org/v1"
-_MAX_PER_COURT  = 100   # Max cases to pull per court per run (API ceiling: 10,000)
+_MAX_PER_COURT  = 20    # Max cases to pull per court per run (enough for daily new cases)
 _CUTOFF_YEAR    = 2025  # Ignore cases with citation year before this
 
 # Province code → CanLII jurisdiction path (used for URL construction)

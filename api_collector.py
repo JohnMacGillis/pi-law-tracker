@@ -18,6 +18,8 @@ import logging
 import random
 import re
 import time
+from datetime import datetime, timedelta
+
 import requests
 
 from config import CANLII_API_KEY
@@ -27,6 +29,7 @@ logger = logging.getLogger(__name__)
 
 _API_BASE       = "https://api.canlii.org/v1"
 _MAX_PER_COURT  = 20    # Max cases to pull per court per run (enough for daily new cases)
+_LOOKBACK_DAYS  = 60    # Only keep cases with citation year within this window
 
 # Single realistic User-Agent for API requests (avoids python-requests default)
 _API_USER_AGENT = (
@@ -62,6 +65,15 @@ def _build_case_url(db_id: str, case_id_raw: str, province: str) -> str:
         return ""
     year = year_match.group(1)
     return f"https://www.canlii.org/en/{jur}/{db_id}/doc/{year}/{case_id_raw}/{case_id_raw}.html"
+
+
+def _citation_year(citation: str) -> int | None:
+    """Extract decision year from citation: '2026 ONSC 1234' → 2026, '[2025] 3 SCR 45' → 2025."""
+    m = re.match(r"(\d{4})\s", citation)
+    if m:
+        return int(m.group(1))
+    m2 = re.search(r"\[(\d{4})\]", citation)
+    return int(m2.group(1)) if m2 else None
 
 
 def _extract_case_id(case_obj: dict) -> str:
@@ -112,11 +124,22 @@ def _fetch_court(db_id: str, province: str, court_name: str,
     if not cases_list:
         logger.warning("    %s: API returned 0 cases (empty response)", db_id)
 
+    # Earliest citation year we'll accept (60-day window → current year or prev year)
+    cutoff_year = (datetime.now() - timedelta(days=_LOOKBACK_DAYS)).year
+
     results = []
     no_url = 0
     already_seen = 0
+    too_old = 0
     for c in cases_list:
         citation = c.get("citation", "")
+
+        # Citation-year filter — only keep decisions within the lookback window.
+        # Cases with unparseable years are kept (benefit of the doubt).
+        cy = _citation_year(citation)
+        if cy is not None and cy < cutoff_year:
+            too_old += 1
+            continue
 
         # The list endpoint does NOT return 'url' — construct it from
         # databaseId + caseId + province jurisdiction mapping.
@@ -143,8 +166,10 @@ def _fetch_court(db_id: str, province: str, court_name: str,
 
     if no_url:
         logger.warning("    %s: %d case(s) skipped — could not construct URL", db_id, no_url)
-    logger.debug("    %s: %d returned, %d seen, %d no-url, %d new",
-                 db_id, len(cases_list), already_seen, no_url, len(results))
+    if too_old:
+        logger.debug("    %s: %d case(s) skipped — citation year < %d", db_id, too_old, cutoff_year)
+    logger.debug("    %s: %d returned, %d seen, %d no-url, %d too-old, %d new",
+                 db_id, len(cases_list), already_seen, no_url, too_old, len(results))
 
     return results
 

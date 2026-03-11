@@ -9,6 +9,7 @@ Manages the two persistence files:
 import csv
 import os
 import logging
+import time
 from datetime import datetime
 
 from config import CASES_CSV, SEEN_IDS_FILE, DATA_DIR
@@ -61,8 +62,18 @@ def load_seen_ids() -> set:
 
 def mark_seen(case_id: str) -> None:
     """Append a case ID to the seen-IDs file."""
-    with open(SEEN_IDS_FILE, "a", encoding="utf-8") as fh:
-        fh.write(case_id + "\n")
+    for attempt in range(1, 4):
+        try:
+            with open(SEEN_IDS_FILE, "a", encoding="utf-8") as fh:
+                fh.write(case_id + "\n")
+            return
+        except PermissionError:
+            if attempt < 3:
+                logger.warning("seen_ids locked (attempt %d/3) — retrying …", attempt)
+                time.sleep(attempt * 3)
+            else:
+                logger.error("seen_ids still locked — skipping mark_seen for %s", case_id)
+                raise
 
 
 def unmark_seen(case_ids: set) -> None:
@@ -118,8 +129,22 @@ def save_case(case_meta: dict, analysis: dict) -> None:
         "case_id":            case_meta.get("case_id", ""),
     }
 
-    with open(CASES_CSV, "a", newline="", encoding="utf-8") as fh:
-        csv.DictWriter(fh, fieldnames=CSV_FIELDS).writerow(row)
+    # Retry loop — Windows file locks (Excel, antivirus) can hold the CSV
+    for attempt in range(1, 6):
+        try:
+            with open(CASES_CSV, "a", newline="", encoding="utf-8") as fh:
+                csv.DictWriter(fh, fieldnames=CSV_FIELDS).writerow(row)
+            break
+        except PermissionError:
+            if attempt < 5:
+                logger.warning(
+                    "cases.csv locked (attempt %d/5) — retrying in %ds …",
+                    attempt, attempt * 5,
+                )
+                time.sleep(attempt * 5)   # 5s, 10s, 15s, 20s
+            else:
+                logger.error("cases.csv still locked after 5 attempts — giving up on this case.")
+                raise
 
     logger.info("Saved: %s | %s | total=%s",
                 row["title"], row["case_type"], row["total_damages"] or "N/A")

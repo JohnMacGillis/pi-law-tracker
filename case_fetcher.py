@@ -168,10 +168,34 @@ def _get_context():
         user_agent=ua,
     )
 
-    # Remove the webdriver flag that bot-detection looks for
-    _context.add_init_script(
-        "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
-    )
+    # Remove automation fingerprints that bot-detection looks for
+    _context.add_init_script("""
+        // Hide webdriver flag
+        Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+
+        // Hide automation-related properties
+        delete window.cdc_adoQpoasnfa76pfcZLmcfl_Array;
+        delete window.cdc_adoQpoasnfa76pfcZLmcfl_Promise;
+        delete window.cdc_adoQpoasnfa76pfcZLmcfl_Symbol;
+
+        // Realistic plugin/mime arrays (Chrome on Windows/Mac)
+        Object.defineProperty(navigator, 'plugins', {
+            get: () => [1, 2, 3, 4, 5],
+        });
+        Object.defineProperty(navigator, 'languages', {
+            get: () => ['en-CA', 'en-US', 'en'],
+        });
+
+        // Realistic Chrome object
+        window.chrome = { runtime: {}, loadTimes: function(){}, csi: function(){} };
+
+        // Realistic permissions query
+        const origQuery = window.navigator.permissions.query;
+        window.navigator.permissions.query = (parameters) =>
+            parameters.name === 'notifications'
+                ? Promise.resolve({ state: Notification.permission })
+                : origQuery(parameters);
+    """)
 
     logger.info(
         "Playwright started (session: %s)",
@@ -320,8 +344,62 @@ def _apply_profile(page) -> None:
     """
     ua, w, h = _next_profile()
     page.set_viewport_size({"width": w, "height": h})
-    page.set_extra_http_headers({"User-Agent": ua})
+
+    # Realistic referrer — looks like the user navigated from CanLII search
+    # or Google, not from nothing (which screams bot).
+    referer = random.choice([
+        "https://www.canlii.org/en/",
+        "https://www.canlii.org/en/#search",
+        "https://www.google.com/",
+        "https://www.google.ca/",
+    ])
+    page.set_extra_http_headers({
+        "User-Agent": ua,
+        "Referer": referer,
+        "Accept-Language": "en-CA,en-US;q=0.9,en;q=0.8",
+    })
     logger.debug("    Profile: %dx%d  ua=…%s", w, h, ua[-30:])
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Human behaviour simulation
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _simulate_human(page) -> None:
+    """
+    Mimic a real person looking at a court decision: brief pause, mouse
+    movement to the content area, a scroll or two.  Bot detectors like
+    DataDome track mouse events and scroll patterns.
+    """
+    try:
+        vp = page.viewport_size or {"width": 1280, "height": 800}
+        w, h = vp["width"], vp["height"]
+
+        # Initial reading pause (like eyes finding the content)
+        page.wait_for_timeout(random.randint(800, 2200))
+
+        # Move mouse to a plausible content area (centre-ish, with jitter)
+        x = w // 2 + random.randint(-200, 200)
+        y = h // 3 + random.randint(-100, 100)
+        page.mouse.move(max(10, x), max(10, y))
+        page.wait_for_timeout(random.randint(300, 800))
+
+        # Scroll down a bit — reading the opening paragraphs
+        scrolls = random.randint(1, 3)
+        for _ in range(scrolls):
+            page.mouse.wheel(0, random.randint(200, 600))
+            page.wait_for_timeout(random.randint(400, 1200))
+
+        # Occasionally move mouse again (like selecting text)
+        if random.random() < 0.4:
+            x2 = w // 2 + random.randint(-300, 300)
+            y2 = h // 2 + random.randint(-150, 150)
+            page.mouse.move(max(10, x2), max(10, y2))
+            page.wait_for_timeout(random.randint(200, 600))
+
+    except Exception:
+        # Non-critical — don't let simulation failures break the fetch
+        pass
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -427,8 +505,8 @@ def fetch_case_text(url: str) -> str | None:
 
         _consecutive_403s = 0
 
-        # Brief render pause — looks more human, lets JS settle
-        page.wait_for_timeout(random.randint(600, 1800))
+        # Simulate human reading behaviour — mouse movement + scroll
+        _simulate_human(page)
 
         text = _extract_text(page)
 

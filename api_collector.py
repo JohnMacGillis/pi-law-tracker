@@ -15,6 +15,7 @@ Set  CANLII_API_KEY  in config.py.  If blank, daily_run.py falls back to RSS.
 """
 
 import logging
+import random
 import re
 import time
 import requests
@@ -26,6 +27,13 @@ logger = logging.getLogger(__name__)
 
 _API_BASE       = "https://api.canlii.org/v1"
 _MAX_PER_COURT  = 20    # Max cases to pull per court per run (enough for daily new cases)
+
+# Single realistic User-Agent for API requests (avoids python-requests default)
+_API_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/124.0.0.0 Safari/537.36"
+)
 
 # Province code → CanLII jurisdiction path (used for URL construction)
 _PROVINCE_TO_JUR = {
@@ -77,8 +85,9 @@ def _fetch_court(db_id: str, province: str, court_name: str,
         "resultCount":   _MAX_PER_COURT,
     }
 
+    headers = {"User-Agent": _API_USER_AGENT}
     try:
-        resp = requests.get(url, params=params, timeout=30)
+        resp = requests.get(url, params=params, headers=headers, timeout=30)
     except Exception as exc:
         logger.error("CanLII API request failed for %s: %s", db_id, exc)
         return []
@@ -169,6 +178,7 @@ def fetch_cited_legislations(case_url: str) -> list[str]:
         resp = requests.get(
             url,
             params={"api_key": CANLII_API_KEY},
+            headers={"User-Agent": _API_USER_AGENT},
             timeout=20,
         )
         if not resp.ok:
@@ -217,7 +227,7 @@ def fetch_new_cases(seen_ids: set) -> list[dict]:
         new_cases.extend(cases)
         logger.info("    %d new case(s)", len(cases))
 
-        time.sleep(1)   # 1s between courts — no DataDome, so short pause is fine
+        time.sleep(random.uniform(1.5, 4.0))   # Jittered delay — avoids metronomic pattern
 
     logger.info("API collection complete — %d new case(s) found", len(new_cases))
     return new_cases

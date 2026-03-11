@@ -14,6 +14,7 @@ Outputs results to data/class_actions.csv
 
 import csv
 import os
+import random
 import re
 import time
 from datetime import datetime, timedelta
@@ -24,6 +25,12 @@ from config import CANLII_API_KEY, DATA_DIR
 
 _API_BASE = "https://api.canlii.org/v1"
 _MAX_PER_QUERY = 3_000
+
+_API_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/124.0.0.0 Safari/537.36"
+)
 
 
 def _year_from_citation(citation: str) -> int | None:
@@ -47,6 +54,7 @@ def _fetch_db_map() -> dict:
     resp = requests.get(
         f"{_API_BASE}/caseBrowse/en/",
         params={"api_key": CANLII_API_KEY},
+        headers={"User-Agent": _API_USER_AGENT},
         timeout=30,
     )
     if not resp.ok:
@@ -106,6 +114,7 @@ def _search(query: str) -> list[dict]:
                 "resultCount": batch,
                 "offset": offset,
             },
+            headers={"User-Agent": _API_USER_AGENT},
             timeout=30,
         )
 
@@ -145,7 +154,7 @@ def _search(query: str) -> list[dict]:
         if len(results) < batch:
             break
         offset += batch
-        time.sleep(1)  # Light delay; 429 retry handles rate limits
+        time.sleep(random.uniform(1.5, 4.0))  # Jittered delay
 
     return all_results
 
@@ -191,7 +200,7 @@ def main():
         print(f"    → {len(batch)} results\n")
         raw_results.extend(batch)
         if qi < len(queries) - 1:
-            time.sleep(2)  # Brief pause between queries
+            time.sleep(random.uniform(3.0, 8.0))  # Jittered pause between queries
 
     if not raw_results:
         print("  No results found.")

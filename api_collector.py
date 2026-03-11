@@ -2,9 +2,9 @@
 api_collector.py
 Discovers new court decisions via the CanLII REST API.
 
-The API returns structured JSON metadata (title, citation, date, URL) for each
-decision — no DataDome cookies, no CAPTCHA, no rate-limit surprises at the
-discovery stage.  Full case text is still fetched via PDF in Phase 1.
+Uses the caseBrowse list endpoint to find recently-published cases, then
+constructs CanLII URLs from databaseId + caseId (the list endpoint does NOT
+return a url field — only the per-case metadata endpoint does).
 
 How to get an API key (free):
   https://www.canlii.org/en/feedback/feedback.html
@@ -15,6 +15,7 @@ Set  CANLII_API_KEY  in config.py.  If blank, daily_run.py falls back to RSS.
 """
 
 import logging
+import re
 import time
 from datetime import datetime, timedelta
 
@@ -29,10 +30,41 @@ _API_BASE     = "https://api.canlii.org/v1"
 _MAX_PER_COURT = 100   # Max cases to pull per court per run (API ceiling: 10,000)
 _LOOKBACK_DAYS = 7     # Fetch cases published in the last N days (seen_ids prevents reprocessing)
 
+# Province code → CanLII jurisdiction path (used for URL construction)
+_PROVINCE_TO_JUR = {
+    "AB": "ab", "BC": "bc", "MB": "mb", "NB": "nb", "NL": "nl",
+    "NS": "ns", "NT": "nt", "NU": "nu", "ON": "on", "PE": "pe",
+    "QC": "qc", "SK": "sk", "YT": "yt", "CA": "ca",
+}
+
 
 def api_available() -> bool:
     """Return True if a CanLII API key is configured."""
     return bool(CANLII_API_KEY and CANLII_API_KEY.strip())
+
+
+def _build_case_url(db_id: str, case_id_raw: str, province: str) -> str:
+    """
+    Construct a CanLII URL from databaseId + caseId.
+    e.g. db_id="onsc", case_id_raw="2025onsc1234", province="ON"
+    → https://www.canlii.org/en/on/onsc/doc/2025/2025onsc1234/2025onsc1234.html
+    """
+    jur = _PROVINCE_TO_JUR.get(province, "")
+    if not jur or not case_id_raw:
+        return ""
+    year_match = re.match(r"(\d{4})", case_id_raw)
+    if not year_match:
+        return ""
+    year = year_match.group(1)
+    return f"https://www.canlii.org/en/{jur}/{db_id}/doc/{year}/{case_id_raw}/{case_id_raw}.html"
+
+
+def _extract_case_id(case_obj: dict) -> str:
+    """Extract the case ID string from the API response object."""
+    cid = case_obj.get("caseId", "")
+    if isinstance(cid, dict):
+        return cid.get("en", "") or cid.get("fr", "")
+    return str(cid) if cid else ""
 
 
 def _fetch_court(db_id: str, province: str, court_name: str,
@@ -68,25 +100,32 @@ def _fetch_court(db_id: str, province: str, court_name: str,
         logger.error("CanLII API: JSON parse error for %s: %s", db_id, exc)
         return []
 
+    cases_list = raw.get("cases", [])
+    if not cases_list:
+        logger.debug("    %s: API returned 0 cases after %s", db_id, published_after)
+
     results = []
-    for c in raw.get("cases", []):
-        case_url = c.get("url", "")
-        case_id  = case_url          # Use URL as unique ID (matches RSS collector)
-        if not case_id or case_id in seen_ids:
+    for c in cases_list:
+        # The list endpoint does NOT return 'url' — construct it from
+        # databaseId + caseId + province jurisdiction mapping.
+        case_id_str = _extract_case_id(c)
+        case_url = _build_case_url(db_id, case_id_str, province)
+
+        if not case_url:
+            logger.debug("    Skipping case with no constructable URL: %s", c)
+            continue
+        if case_url in seen_ids:
             continue
 
-        # The list endpoint returns: databaseId, caseId, url, title, citation
-        # decisionDate is available in the per-case metadata endpoint but we
-        # skip that extra call here — Claude will extract the date from the PDF.
         results.append({
-            "case_id":        case_id,
+            "case_id":        case_url,   # URL as unique ID (matches RSS collector)
             "title":          c.get("title", "Unknown").strip(),
             "url":            case_url,
             "province":       province,
             "court_name":     court_name,
             "published_date": c.get("decisionDate", "Unknown"),
             "citation":       c.get("citation", ""),
-            "rss_summary":    "",   # API list endpoint has no text snippets
+            "rss_summary":    "",
         })
 
     return results

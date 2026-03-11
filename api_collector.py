@@ -17,7 +17,7 @@ Set  CANLII_API_KEY  in config.py.  If blank, daily_run.py falls back to RSS.
 import logging
 import re
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import requests
 
@@ -28,7 +28,7 @@ logger = logging.getLogger(__name__)
 
 _API_BASE       = "https://api.canlii.org/v1"
 _MAX_PER_COURT  = 100   # Max cases to pull per court per run (API ceiling: 10,000)
-_EARLIEST_DATE  = "2026-03-09"  # Ignore cases before this date
+_LOOKBACK_DAYS  = 60  # Only include cases decided within this many days
 
 # Province code → CanLII jurisdiction path (used for URL construction)
 _PROVINCE_TO_JUR = {
@@ -111,9 +111,10 @@ def _fetch_court(db_id: str, province: str, court_name: str,
     already_seen = 0
     too_old = 0
     for c in cases_list:
-        # Client-side date filter — only include cases ON or AFTER the cutoff
+        # Client-side date filter — only include cases decided recently
         decision_date = c.get("decisionDate", "")
-        if not decision_date or decision_date < _EARLIEST_DATE:
+        cutoff = (datetime.now() - timedelta(days=_LOOKBACK_DAYS)).strftime("%Y-%m-%d")
+        if not decision_date or decision_date < cutoff:
             too_old += 1
             continue
 

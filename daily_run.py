@@ -23,6 +23,7 @@ Cookie refresh:
   Cases that still fail are un-marked so tomorrow's run retries them.
 """
 
+import json
 import logging
 import os
 import sys
@@ -33,6 +34,10 @@ from datetime import datetime
 os.chdir(os.path.dirname(os.path.abspath(__file__)))
 
 from config import DATA_DIR, LOG_FILE, MAX_CASE_CHARS
+
+# Checkpoint file — surviving candidates are saved here so a crashed run
+# can resume Phase 1/2 without re-discovering and re-filtering.
+_PENDING_FILE = os.path.join(DATA_DIR, "pending_cases.json")
 from database import ensure_data_dir, load_seen_ids, mark_seen, save_case, unmark_seen
 from case_fetcher import (
     fetch_case_text, smart_truncate, close_browser, warmup,
@@ -103,6 +108,41 @@ def _send_cookie_alert() -> None:
         logger.warning("Could not send alert email: %s", exc)
 
 
+# ── Crash-recovery checkpoint ────────────────────────────────────────────────
+
+def _save_pending(candidates: list[dict]) -> None:
+    """Save the Phase-0 survivors to disk so a crash doesn't lose them."""
+    try:
+        with open(_PENDING_FILE, "w", encoding="utf-8") as fh:
+            json.dump(candidates, fh)
+        logger.debug("Checkpoint: saved %d pending cases", len(candidates))
+    except Exception as exc:
+        logger.warning("Could not save pending checkpoint: %s", exc)
+
+
+def _load_pending() -> list[dict]:
+    """Load leftover candidates from a previous crashed run, if any."""
+    if not os.path.exists(_PENDING_FILE):
+        return []
+    try:
+        with open(_PENDING_FILE, "r", encoding="utf-8") as fh:
+            cases = json.load(fh)
+        logger.info("Resuming %d pending cases from previous crashed run", len(cases))
+        return cases
+    except Exception as exc:
+        logger.warning("Could not load pending checkpoint: %s", exc)
+        return []
+
+
+def _clear_pending() -> None:
+    """Remove the checkpoint file after a successful run."""
+    try:
+        if os.path.exists(_PENDING_FILE):
+            os.remove(_PENDING_FILE)
+    except OSError:
+        pass
+
+
 # ── PDF fetch helper (called twice when retry is needed) ──────────────────────
 
 def _run_fetch_phase(
@@ -148,6 +188,9 @@ def run() -> None:
     seen_ids = load_seen_ids()
     logger.info("Known case IDs: %d", len(seen_ids))
 
+    # ── Resume from crash: check for leftover pending cases ────────────────
+    pending = _load_pending()
+
     # ── Discovery: API (preferred) or RSS fallback ────────────────────────────
     feed_health = []
     if api_collector.api_available():
@@ -159,17 +202,26 @@ def run() -> None:
 
     logger.info("New cases to evaluate: %d", len(new_cases))
 
+    # Mark new discoveries as seen immediately.
+    # Cases that 403 are un-marked at the end so tomorrow retries them.
+    for case_meta in new_cases:
+        mark_seen(case_meta["case_id"])
+
+    # Merge pending (from crash) with new discoveries, dedup by case_id
+    if pending:
+        new_ids = {c["case_id"] for c in new_cases}
+        resumed = [c for c in pending if c["case_id"] not in new_ids]
+        if resumed:
+            logger.info("Merged %d resumed cases with %d new cases", len(resumed), len(new_cases))
+            new_cases = resumed + new_cases
+
     if not new_cases:
         elapsed = (datetime.now() - start).seconds
         logger.info("Nothing new today. Run complete.")
         logger.info("=" * 65)
+        _clear_pending()
         _send_daily_status(0, 0, 0, elapsed, feed_health, {"discovered": 0})
         return
-
-    # Mark all as seen immediately for crash safety.
-    # Cases that 403 are un-marked at the end so tomorrow retries them.
-    for case_meta in new_cases:
-        mark_seen(case_meta["case_id"])
 
     saved   = 0
     skipped = 0
@@ -228,10 +280,14 @@ def run() -> None:
         elapsed = (datetime.now() - start).seconds
         logger.info("No candidates after pre-filter. Run complete.")
         logger.info("=" * 65)
+        _clear_pending()
         _send_daily_status(saved, skipped, errors, elapsed, feed_health, stats)
         return
 
     stats["to_fetch"] = len(candidates)
+
+    # ── Checkpoint: save candidates so a crash can resume from here ────────
+    _save_pending(candidates)
 
     # ── Phase 1: Fetch case text ───────────────────────────────────────────────
     # Warm up the browser session first — if CanLII shows a CAPTCHA the user
@@ -333,6 +389,9 @@ def run() -> None:
         elapsed, saved, skipped, errors,
     )
     logger.info("=" * 65)
+
+    # Run completed successfully — clear the crash-recovery checkpoint
+    _clear_pending()
 
     # Close the browser and persist the session for tomorrow's run
     close_browser()

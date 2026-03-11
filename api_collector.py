@@ -17,18 +17,16 @@ Set  CANLII_API_KEY  in config.py.  If blank, daily_run.py falls back to RSS.
 import logging
 import re
 import time
-from datetime import datetime, timedelta
 
 import requests
 
-from config import CANLII_API_KEY, REQUEST_DELAY_SECONDS
+from config import CANLII_API_KEY
 from courts import COURTS
 
 logger = logging.getLogger(__name__)
 
 _API_BASE     = "https://api.canlii.org/v1"
 _MAX_PER_COURT = 100   # Max cases to pull per court per run (API ceiling: 10,000)
-_LOOKBACK_DAYS = 7     # Fetch cases published in the last N days (seen_ids prevents reprocessing)
 
 # Province code → CanLII jurisdiction path (used for URL construction)
 _PROVINCE_TO_JUR = {
@@ -68,14 +66,16 @@ def _extract_case_id(case_obj: dict) -> str:
 
 
 def _fetch_court(db_id: str, province: str, court_name: str,
-                 published_after: str, seen_ids: set) -> list[dict]:
+                 seen_ids: set) -> list[dict]:
     """Query the caseBrowse API for one court and return new case dicts."""
     url = f"{_API_BASE}/caseBrowse/en/{db_id}/"
+    # Don't use publishedAfter — CanLII's date parameters are unreliable
+    # (same issue as the search endpoint).  Fetch the most recent cases
+    # and let seen_ids handle dedup.
     params = {
         "api_key":       CANLII_API_KEY,
         "offset":        0,
         "resultCount":   _MAX_PER_COURT,
-        "publishedAfter": published_after,
     }
 
     try:
@@ -102,9 +102,11 @@ def _fetch_court(db_id: str, province: str, court_name: str,
 
     cases_list = raw.get("cases", [])
     if not cases_list:
-        logger.debug("    %s: API returned 0 cases after %s", db_id, published_after)
+        logger.warning("    %s: API returned 0 cases (empty response)", db_id)
 
     results = []
+    no_url = 0
+    already_seen = 0
     for c in cases_list:
         # The list endpoint does NOT return 'url' — construct it from
         # databaseId + caseId + province jurisdiction mapping.
@@ -112,9 +114,10 @@ def _fetch_court(db_id: str, province: str, court_name: str,
         case_url = _build_case_url(db_id, case_id_str, province)
 
         if not case_url:
-            logger.debug("    Skipping case with no constructable URL: %s", c)
+            no_url += 1
             continue
         if case_url in seen_ids:
+            already_seen += 1
             continue
 
         results.append({
@@ -127,6 +130,11 @@ def _fetch_court(db_id: str, province: str, court_name: str,
             "citation":       c.get("citation", ""),
             "rss_summary":    "",
         })
+
+    if no_url:
+        logger.warning("    %s: %d case(s) skipped — could not construct URL", db_id, no_url)
+    logger.debug("    %s: %d returned, %d seen, %d no-url, %d new",
+                 db_id, len(cases_list), already_seen, no_url, len(results))
 
     return results
 
@@ -191,13 +199,9 @@ def fetch_new_cases(seen_ids: set) -> list[dict]:
     if not api_available():
         raise RuntimeError("CanLII API key not set — call api_available() first.")
 
-    published_after = (
-        datetime.now() - timedelta(days=_LOOKBACK_DAYS)
-    ).strftime("%Y-%m-%d")
-
     logger.info(
-        "CanLII API: fetching cases published after %s for %d courts …",
-        published_after, len(COURTS),
+        "CanLII API: fetching latest cases from %d courts …",
+        len(COURTS),
     )
 
     new_cases: list[dict] = []
@@ -208,7 +212,7 @@ def fetch_new_cases(seen_ids: set) -> list[dict]:
         court_name = court["name"]
 
         logger.info("  API → %s", court_name)
-        cases = _fetch_court(db_id, province, court_name, published_after, seen_ids)
+        cases = _fetch_court(db_id, province, court_name, seen_ids)
         new_cases.extend(cases)
         logger.info("    %d new case(s)", len(cases))
 

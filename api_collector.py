@@ -17,7 +17,7 @@ Set  CANLII_API_KEY  in config.py.  If blank, daily_run.py falls back to RSS.
 import logging
 import re
 import time
-from datetime import datetime, timedelta
+from datetime import datetime
 
 import requests
 
@@ -28,7 +28,7 @@ logger = logging.getLogger(__name__)
 
 _API_BASE       = "https://api.canlii.org/v1"
 _MAX_PER_COURT  = 100   # Max cases to pull per court per run (API ceiling: 10,000)
-_LOOKBACK_DAYS  = 60  # Only include cases decided within this many days
+_CUTOFF_YEAR    = 2025  # Ignore cases with citation year before this
 
 # Province code → CanLII jurisdiction path (used for URL construction)
 _PROVINCE_TO_JUR = {
@@ -36,6 +36,17 @@ _PROVINCE_TO_JUR = {
     "NS": "ns", "NT": "nt", "NU": "nu", "ON": "on", "PE": "pe",
     "QC": "qc", "SK": "sk", "YT": "yt", "CA": "ca",
 }
+
+
+def _year_from_citation(citation: str) -> int | None:
+    """Extract decision year from citation: '2025 ONSC 1234' → 2025"""
+    m = re.match(r"(\d{4})\s+\w+", citation.strip())
+    if m:
+        return int(m.group(1))
+    m = re.search(r"\[(\d{4})\]", citation)
+    if m:
+        return int(m.group(1))
+    return None
 
 
 def api_available() -> bool:
@@ -111,10 +122,11 @@ def _fetch_court(db_id: str, province: str, court_name: str,
     already_seen = 0
     too_old = 0
     for c in cases_list:
-        # Client-side date filter — only include cases decided recently
-        decision_date = c.get("decisionDate", "")
-        cutoff = (datetime.now() - timedelta(days=_LOOKBACK_DAYS)).strftime("%Y-%m-%d")
-        if not decision_date or decision_date < cutoff:
+        # Filter by year extracted from citation (the list endpoint
+        # does NOT return decisionDate — only the per-case metadata does)
+        citation = c.get("citation", "")
+        year = _year_from_citation(citation)
+        if year is not None and year < _CUTOFF_YEAR:
             too_old += 1
             continue
 
@@ -136,8 +148,8 @@ def _fetch_court(db_id: str, province: str, court_name: str,
             "url":            case_url,
             "province":       province,
             "court_name":     court_name,
-            "published_date": decision_date or "Unknown",
-            "citation":       c.get("citation", ""),
+            "published_date": c.get("decisionDate", "") or str(year or "Unknown"),
+            "citation":       citation,
             "rss_summary":    "",
         })
 

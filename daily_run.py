@@ -374,7 +374,12 @@ def run() -> None:
             stats["ai_not_pi"] += 1
             continue
 
-        save_case(case_meta, analysis)
+        try:
+            save_case(case_meta, analysis)
+        except Exception as exc:
+            logger.error("    [%s] Save failed: %s — continuing", title, exc)
+            errors += 1
+            continue
         saved += 1
         logger.info(
             "    [%s] SAVED — %s | total: %s",

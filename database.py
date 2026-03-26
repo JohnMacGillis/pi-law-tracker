@@ -143,8 +143,8 @@ def save_case(case_meta: dict, analysis: dict) -> None:
                 )
                 time.sleep(attempt * 5)   # 5s, 10s, 15s, 20s
             else:
-                logger.error("cases.csv still locked after 5 attempts — giving up on this case.")
-                raise
+                logger.error("cases.csv still locked after 5 attempts — skipping this case.")
+                return   # Don't crash the entire run over a file lock
 
     logger.info("Saved: %s | %s | total=%s",
                 row["title"], row["case_type"], row["total_damages"] or "N/A")

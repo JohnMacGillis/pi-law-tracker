@@ -352,6 +352,7 @@ def send_alert_email(subject: str, body: str) -> bool:
 
 _CLASS_ACTION_TYPES = {"Class Action"}
 _PI_TYPES           = {"MVA", "Slip and Fall", "Trip and Fall", "Other PI", "LTD"}
+_PI_PROVINCES       = {"NS", "NB", "PE", "NL", "ON"}  # Atlantic Canada + Ontario
 
 
 def _send_digest(cases: list[dict], week_start: datetime, week_end: datetime,
@@ -409,7 +410,8 @@ def send_weekly_report() -> bool:
     ca_cases = [c for c in all_cases
                 if c.get("case_type", "") in _CLASS_ACTION_TYPES]
     pi_cases = [c for c in all_cases
-                if c.get("case_type", "") not in _CLASS_ACTION_TYPES]
+                if c.get("case_type", "") not in _CLASS_ACTION_TYPES
+                and c.get("province", "") in _PI_PROVINCES]
 
     ok1 = _send_digest(
         pi_cases, week_start, week_end,

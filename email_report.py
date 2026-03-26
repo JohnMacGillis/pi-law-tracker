@@ -187,7 +187,9 @@ def _province_section(province: str, cases: list[dict]) -> str:
 
 # ── Full email ────────────────────────────────────────────────────────────────
 
-def build_html(cases: list[dict], week_start: datetime, week_end: datetime) -> str:
+def build_html(cases: list[dict], week_start: datetime, week_end: datetime,
+               heading: str = "PI Damages Weekly",
+               header_color: str = "#0f172a") -> str:
     total      = len(cases)
     date_range = (
         f"{week_start.strftime('%B %d')} &ndash; {week_end.strftime('%B %d, %Y')}"
@@ -252,11 +254,11 @@ def build_html(cases: list[dict], week_start: datetime, week_end: datetime) -> s
       <!--<![endif]-->
 
         <!-- HEADER -->
-        <tr><td bgcolor="#0f172a" style="background-color:#0f172a;padding:24px 24px 20px 24px;">
+        <tr><td bgcolor="{header_color}" style="background-color:{header_color};padding:24px 24px 20px 24px;">
           <table cellpadding="0" cellspacing="0" border="0" width="100%">
             <tr><td style="font-size:20px;font-weight:700;color:#ffffff;line-height:1.3;
                           padding:0 0 8px 0;font-family:{_F};">
-              PI Damages Weekly</td></tr>
+              {heading}</td></tr>
             <tr><td style="font-size:13px;color:#94a3b8;line-height:1.4;
                           font-family:{_F};">
               {date_range}
@@ -348,26 +350,25 @@ def send_alert_email(subject: str, body: str) -> bool:
         return False
 
 
-def send_weekly_report() -> bool:
-    """
-    Collect cases from the last 7 days, build the HTML digest, and send it.
-    Returns True on success, False on failure.
-    """
-    week_end   = datetime.now()
-    week_start = week_end - timedelta(days=7)
+_CLASS_ACTION_TYPES = {"Class Action"}
+_PI_TYPES           = {"MVA", "Slip and Fall", "Trip and Fall", "Other PI", "LTD"}
 
-    cases = load_cases_since(week_start.strftime("%Y-%m-%d"))
-    logger.info(
-        "Building weekly digest: %d case(s) from %s to %s",
-        len(cases),
-        week_start.strftime("%Y-%m-%d"),
-        week_end.strftime("%Y-%m-%d"),
+
+def _send_digest(cases: list[dict], week_start: datetime, week_end: datetime,
+                 heading: str, subject_prefix: str,
+                 header_color: str = "#0f172a") -> bool:
+    """Build and send a single digest email. Returns True on success."""
+    if not cases:
+        logger.info("No cases for '%s' — skipping email.", heading)
+        return True
+
+    html = build_html(cases, week_start, week_end, heading=heading,
+                      header_color=header_color)
+    date_str = (
+        f"{week_start.strftime('%b %d')}–{week_end.strftime('%b %d, %Y')}"
     )
-
-    html    = build_html(cases, week_start, week_end)
     subject = (
-        f"{EMAIL_SUBJECT} — "
-        f"{week_start.strftime('%b %d')}–{week_end.strftime('%b %d, %Y')} "
+        f"{subject_prefix} — {date_str} "
         f"({len(cases)} case{'s' if len(cases) != 1 else ''})"
     )
 
@@ -377,12 +378,49 @@ def send_weekly_report() -> bool:
         subject=subject,
         html_content=html,
     )
-
     try:
         sg       = SendGridAPIClient(SENDGRID_API_KEY)
         response = sg.send(message)
-        logger.info("Email sent successfully. Status: %s", response.status_code)
+        logger.info("'%s' email sent. Status: %s", heading, response.status_code)
         return True
     except Exception as exc:
-        logger.error("SendGrid error: %s", exc)
+        logger.error("Failed to send '%s' email: %s", heading, exc)
         return False
+
+
+def send_weekly_report() -> bool:
+    """
+    Collect cases from the last 7 days and send TWO digest emails:
+      1. MVA / Slip & Fall / LTD — personal injury cases
+      2. Class Actions
+    Returns True if both succeed.
+    """
+    week_end   = datetime.now()
+    week_start = week_end - timedelta(days=7)
+
+    all_cases = load_cases_since(week_start.strftime("%Y-%m-%d"))
+    logger.info(
+        "Building weekly digests: %d case(s) from %s to %s",
+        len(all_cases),
+        week_start.strftime("%Y-%m-%d"),
+        week_end.strftime("%Y-%m-%d"),
+    )
+
+    ca_cases = [c for c in all_cases
+                if c.get("case_type", "") in _CLASS_ACTION_TYPES]
+    pi_cases = [c for c in all_cases
+                if c.get("case_type", "") not in _CLASS_ACTION_TYPES]
+
+    ok1 = _send_digest(
+        pi_cases, week_start, week_end,
+        heading="PI Damages Weekly",
+        subject_prefix="PI Law Tracker — MVA / Slip & Fall / LTD",
+        header_color="#0f172a",
+    )
+    ok2 = _send_digest(
+        ca_cases, week_start, week_end,
+        heading="Class Actions Weekly",
+        subject_prefix="PI Law Tracker — Class Actions",
+        header_color="#312e81",
+    )
+    return ok1 and ok2

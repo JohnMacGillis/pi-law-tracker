@@ -124,22 +124,11 @@ def _fetch_court(db_id: str, province: str, court_name: str,
     if not cases_list:
         logger.warning("    %s: API returned 0 cases (empty response)", db_id)
 
-    # Earliest citation year we'll accept (60-day window → current year or prev year)
-    cutoff_year = (datetime.now() - timedelta(days=_LOOKBACK_DAYS)).year
-
     results = []
     no_url = 0
     already_seen = 0
-    too_old = 0
     for c in cases_list:
         citation = c.get("citation", "")
-
-        # Citation-year filter — only keep decisions within the lookback window.
-        # Cases with unparseable years are kept (benefit of the doubt).
-        cy = _citation_year(citation)
-        if cy is not None and cy < cutoff_year:
-            too_old += 1
-            continue
 
         # The list endpoint does NOT return 'url' — construct it from
         # databaseId + caseId + province jurisdiction mapping.
@@ -166,10 +155,8 @@ def _fetch_court(db_id: str, province: str, court_name: str,
 
     if no_url:
         logger.warning("    %s: %d case(s) skipped — could not construct URL", db_id, no_url)
-    if too_old:
-        logger.debug("    %s: %d case(s) skipped — citation year < %d", db_id, too_old, cutoff_year)
-    logger.debug("    %s: %d returned, %d seen, %d no-url, %d too-old, %d new",
-                 db_id, len(cases_list), already_seen, no_url, too_old, len(results))
+    logger.debug("    %s: %d returned, %d seen, %d no-url, %d new",
+                 db_id, len(cases_list), already_seen, no_url, len(results))
 
     return results
 

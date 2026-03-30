@@ -28,7 +28,7 @@ from courts import COURTS
 logger = logging.getLogger(__name__)
 
 _API_BASE       = "https://api.canlii.org/v1"
-_MAX_PER_COURT  = 100   # TEMP: 100 for 60-day reprocess; set back to 20 after
+_MAX_PER_COURT  = 500   # TEMP: 500 for 60-day reprocess; set back to 20 after
 _LOOKBACK_DAYS  = 60    # Only keep cases with citation year within this window
 
 # Single realistic User-Agent for API requests (avoids python-requests default)

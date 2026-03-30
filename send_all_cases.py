@@ -19,7 +19,10 @@ from datetime import datetime, timedelta
 os.chdir(os.path.dirname(os.path.abspath(__file__)))
 
 from database import load_cases_since
-from email_report import _send_digest, _CLASS_ACTION_TYPES, _PI_PROVINCES
+from email_report import (
+    _send_digest, _CLASS_ACTION_TYPES,
+    _MVA_TYPES, _NATIONAL_TYPES, _REGIONAL_PROVINCES,
+)
 
 
 def main():
@@ -40,15 +43,20 @@ def main():
     all_cases = load_cases_since(since)
     print(f"Loaded {len(all_cases)} cases since {since}")
 
-    # Split
+    # Split — MVA limited to Atlantic + ON; LTD/Occupiers/Other PI are national
     ca_cases = [c for c in all_cases
                 if c.get("case_type", "") in _CLASS_ACTION_TYPES]
-    pi_cases = [c for c in all_cases
-                if c.get("case_type", "") not in _CLASS_ACTION_TYPES
-                and c.get("province", "") in _PI_PROVINCES]
+    pi_cases = []
+    for c in all_cases:
+        ct = c.get("case_type", "")
+        prov = c.get("province", "")
+        if ct in _MVA_TYPES and prov in _REGIONAL_PROVINCES:
+            pi_cases.append(c)
+        elif ct in _NATIONAL_TYPES:
+            pi_cases.append(c)
 
-    print(f"  PI cases (Atlantic + ON): {len(pi_cases)}")
-    print(f"  Class Action cases:       {len(ca_cases)}")
+    print(f"  PI cases (MVA: Atlantic+ON; LTD/Occ.Liab: national): {len(pi_cases)}")
+    print(f"  Class Action cases: {len(ca_cases)}")
 
     if not pi_cases and not ca_cases:
         print("Nothing to send.")

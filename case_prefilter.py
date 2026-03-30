@@ -432,6 +432,11 @@ _TITLE_EXCLUDES = [
     "judicial review of",
     "certiorari",
     "habeas corpus",
+    # Ontario SABS / LAT — not tort damages
+    " and licence appeal tribunal",
+    " v. licence appeal tribunal",
+    "statutory accident benefits",
+    "sabs",
 ]
 
 

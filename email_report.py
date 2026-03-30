@@ -28,22 +28,35 @@ logger = logging.getLogger(__name__)
 
 # ── Province display config ───────────────────────────────────────────────────
 
-PROVINCE_ORDER = ["NS", "NB", "PE", "NL", "ON"]
+PROVINCE_ORDER = ["NS", "NB", "PE", "NL", "ON", "BC", "AB", "SK", "MB", "QC", "NT", "NU", "YT", "CA"]
 PROVINCE_NAMES = {
     "NS": "Nova Scotia",
     "NB": "New Brunswick",
     "PE": "Prince Edward Island",
     "NL": "Newfoundland & Labrador",
     "ON": "Ontario",
+    "BC": "British Columbia",
+    "AB": "Alberta",
+    "SK": "Saskatchewan",
+    "MB": "Manitoba",
+    "QC": "Quebec",
+    "NT": "Northwest Territories",
+    "NU": "Nunavut",
+    "YT": "Yukon",
+    "CA": "Federal",
 }
 
 CASE_TYPE_COLOURS = {
-    "MVA":           "#2563eb",
-    "Slip and Fall": "#ea580c",
-    "Trip and Fall": "#ea580c",
-    "Other PI":      "#6b7280",
-    "LTD":           "#059669",
-    "Class Action":  "#7c3aed",
+    "MVA Damages":        "#2563eb",
+    "MVA Liability":      "#1d4ed8",
+    "Occupiers Liability":"#ea580c",
+    "Other PI":           "#6b7280",
+    "LTD":                "#059669",
+    "Class Action":       "#7c3aed",
+    # Legacy types (for old CSV rows)
+    "MVA":                "#2563eb",
+    "Slip and Fall":      "#ea580c",
+    "Trip and Fall":      "#ea580c",
 }
 
 _F = "Arial,Helvetica,sans-serif"
@@ -351,8 +364,16 @@ def send_alert_email(subject: str, body: str) -> bool:
 
 
 _CLASS_ACTION_TYPES = {"Class Action"}
-_PI_TYPES           = {"MVA", "Slip and Fall", "Trip and Fall", "Other PI", "LTD"}
-_PI_PROVINCES       = {"NS", "NB", "PE", "NL", "ON"}  # Atlantic Canada + Ontario
+
+# MVA: Atlantic + Ontario only.  LTD + Occupiers Liability + Other PI: national.
+_MVA_TYPES          = {"MVA Damages", "MVA Liability", "MVA"}   # includes legacy "MVA"
+_REGIONAL_PROVINCES = {"NS", "NB", "PE", "NL", "ON"}           # Atlantic Canada + Ontario
+_NATIONAL_TYPES     = {"LTD", "Occupiers Liability", "Other PI",
+                       "Slip and Fall", "Trip and Fall"}         # includes legacy types
+
+# All PI types combined (for external import)
+_PI_TYPES           = _MVA_TYPES | _NATIONAL_TYPES
+_PI_PROVINCES       = _REGIONAL_PROVINCES  # kept for backward compat
 
 
 def _send_digest(cases: list[dict], week_start: datetime, week_end: datetime,
@@ -409,14 +430,21 @@ def send_weekly_report() -> bool:
 
     ca_cases = [c for c in all_cases
                 if c.get("case_type", "") in _CLASS_ACTION_TYPES]
-    pi_cases = [c for c in all_cases
-                if c.get("case_type", "") not in _CLASS_ACTION_TYPES
-                and c.get("province", "") in _PI_PROVINCES]
+
+    # PI filter: MVA types limited to Atlantic + ON; LTD/Occupiers/Other PI are national
+    pi_cases = []
+    for c in all_cases:
+        ct = c.get("case_type", "")
+        prov = c.get("province", "")
+        if ct in _MVA_TYPES and prov in _REGIONAL_PROVINCES:
+            pi_cases.append(c)
+        elif ct in _NATIONAL_TYPES:
+            pi_cases.append(c)
 
     ok1 = _send_digest(
         pi_cases, week_start, week_end,
         heading="PI Damages Weekly",
-        subject_prefix="PI Law Tracker — MVA / Slip & Fall / LTD",
+        subject_prefix="PI Law Tracker — PI Damages",
         header_color="#0f172a",
     )
     ok2 = _send_digest(

@@ -2,37 +2,30 @@
 case_fetcher.py
 Fetches court decision text from CanLII.
 
-Primary method: curl_cffi — impersonates Chrome's TLS fingerprint perfectly.
-  No browser automation to detect, no DataDome JS challenges to fight.
-  Just plain HTTP requests that look identical to real Chrome at the TLS level.
-
-Fallback: Playwright (real browser) — only used if curl_cffi gets blocked.
-  Opens a visible Chrome window so the user can solve any CAPTCHA.
+Hybrid approach:
+  1. Playwright opens once to visit the CanLII homepage and solve any
+     DataDome JS challenge / CAPTCHA. This establishes the datadome cookie.
+  2. The datadome cookie is extracted and passed to curl_cffi, which does
+     all the actual case fetching — fast HTTP requests with Chrome TLS
+     impersonation, no browser needed per case.
+  3. If the datadome cookie expires mid-run (403), Playwright reopens
+     briefly to refresh it.
 """
 
+import json
 import logging
 import os
 import random
-import re
 import threading
 import time
 
 from bs4 import BeautifulSoup
 from curl_cffi import requests as cffi_requests
+from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
 
 from config import REQUEST_DELAY_SECONDS, DATA_DIR
 
 logger = logging.getLogger(__name__)
-
-# ── User agents — rotated per fetch ──────────────────────────────────────────
-_USER_AGENTS = [
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
-]
 
 # ── Rate limiter (thread-safe) ────────────────────────────────────────────────
 _request_lock      = threading.Lock()
@@ -42,12 +35,140 @@ _last_request_time = 0.0
 _403_THRESHOLD    = 3
 _consecutive_403s = 0
 
-# ── Session: curl_cffi keeps cookies across requests like a real browser ──────
-_session = None
-
 # ── Session rotation ─────────────────────────────────────────────────────────
 _SESSION_ROTATE_EVERY = 15
 _fetches_this_session = 0
+
+# ── Cookie file — persists DataDome cookie between runs ──────────────────────
+_COOKIE_FILE = os.path.join(DATA_DIR, "datadome_cookies.json")
+
+# ── curl_cffi session ─────────────────────────────────────────────────────────
+_session = None
+
+# ── User agents ──────────────────────────────────────────────────────────────
+_USER_AGENTS = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Cookie management — Playwright gets the cookie, curl_cffi uses it
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _save_cookies(cookies: list[dict]) -> None:
+    """Save cookies to disk for reuse across runs."""
+    os.makedirs(DATA_DIR, exist_ok=True)
+    with open(_COOKIE_FILE, "w", encoding="utf-8") as f:
+        json.dump(cookies, f)
+    logger.debug("Cookies saved → %s", _COOKIE_FILE)
+
+
+def _load_cookies() -> list[dict]:
+    """Load cookies from disk if available."""
+    if not os.path.exists(_COOKIE_FILE):
+        return []
+    try:
+        with open(_COOKIE_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return []
+
+
+def _get_datadome_cookie_via_playwright() -> list[dict]:
+    """
+    Open Playwright briefly to visit CanLII and solve the DataDome challenge.
+    Returns the browser cookies (including the datadome cookie).
+    The browser window is visible so the user can solve any CAPTCHA.
+    """
+    logger.info("Opening browser to establish DataDome session …")
+    pw = sync_playwright().start()
+
+    try:
+        try:
+            browser = pw.chromium.launch(channel="chrome", headless=False)
+            logger.info("Playwright: using real Chrome")
+        except Exception:
+            browser = pw.chromium.launch(
+                headless=False,
+                args=["--disable-blink-features=AutomationControlled"],
+            )
+            logger.info("Playwright: using bundled Chromium")
+
+        ctx = browser.new_context(
+            locale="en-CA",
+            timezone_id=random.choice(["America/Halifax", "America/Toronto", "America/Moncton"]),
+            user_agent=random.choice(_USER_AGENTS),
+        )
+
+        # Hide webdriver flag
+        ctx.add_init_script(
+            "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
+        )
+
+        page = ctx.new_page()
+        page.goto("https://www.canlii.org/en/", wait_until="domcontentloaded", timeout=30_000)
+
+        # Wait for real CanLII content — if DataDome shows a CAPTCHA, the user
+        # solves it in the visible browser window.
+        logger.info(
+            "Waiting for CanLII to load (solve any CAPTCHA in the browser window) …"
+        )
+        try:
+            page.wait_for_function(
+                "() => document.body.innerText.length > 1500",
+                timeout=120_000,
+                polling=3_000,
+            )
+            logger.info("CanLII loaded — extracting cookies.")
+        except PWTimeout:
+            logger.warning("Timed out waiting for CanLII — proceeding with whatever cookies we have.")
+
+        # Browse a bit to look human
+        try:
+            page.wait_for_timeout(random.randint(1500, 3000))
+            links = page.query_selector_all("a[href*='/en/']")
+            if links:
+                random.choice(links[:10]).click()
+                page.wait_for_timeout(random.randint(2000, 4000))
+        except Exception:
+            pass
+
+        # Extract all cookies
+        cookies = ctx.cookies()
+        logger.info("Got %d cookies from browser", len(cookies))
+
+        _save_cookies(cookies)
+
+        page.close()
+        ctx.close()
+        browser.close()
+
+        return cookies
+
+    except Exception as exc:
+        logger.error("Playwright cookie extraction failed: %s", exc)
+        return []
+    finally:
+        pw.stop()
+
+
+def _apply_cookies_to_session(session, cookies: list[dict]) -> None:
+    """Transfer Playwright cookies to the curl_cffi session."""
+    for c in cookies:
+        session.cookies.set(
+            c["name"],
+            c["value"],
+            domain=c.get("domain", ".canlii.org"),
+            path=c.get("path", "/"),
+        )
+    dd_names = [c["name"] for c in cookies if "datadome" in c["name"].lower()]
+    logger.info("Applied %d cookies to HTTP session (datadome: %s)",
+                len(cookies), dd_names or "none found")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -61,7 +182,15 @@ def _get_session():
         return _session
 
     _session = cffi_requests.Session(impersonate="chrome")
-    logger.info("curl_cffi session created (impersonating Chrome TLS)")
+
+    # Load saved cookies from disk (from a previous Playwright warmup)
+    cookies = _load_cookies()
+    if cookies:
+        _apply_cookies_to_session(_session, cookies)
+        logger.info("curl_cffi session created with %d saved cookies", len(cookies))
+    else:
+        logger.info("curl_cffi session created (no saved cookies — warmup needed)")
+
     return _session
 
 
@@ -84,11 +213,20 @@ def reset_403_counter() -> None:
 
 
 def rebuild_session() -> None:
-    """Close and recreate the session — fresh cookies, fresh identity."""
-    global _consecutive_403s
+    """Close session and refresh DataDome cookies via Playwright."""
+    global _consecutive_403s, _fetches_this_session
     close_browser()
     _consecutive_403s = 0
-    logger.info("Session rebuilt — fresh cookies on next fetch.")
+    _fetches_this_session = 0
+
+    # Delete old cookies and get fresh ones via browser
+    if os.path.exists(_COOKIE_FILE):
+        os.remove(_COOKIE_FILE)
+    cookies = _get_datadome_cookie_via_playwright()
+    if cookies:
+        # Recreate session with fresh cookies
+        _get_session()
+    logger.info("Session rebuilt with fresh DataDome cookies.")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -124,22 +262,23 @@ def _pause() -> None:
 
 def warmup() -> None:
     """
-    Hit the CanLII homepage to establish cookies before fetching cases.
-    With curl_cffi this is just a quick HTTP GET — no browser needed.
+    Ensure we have a valid DataDome cookie. Uses saved cookies if available;
+    opens Playwright briefly to get fresh ones if not.
     """
-    session = _get_session()
-    try:
-        logger.info("Warming up — hitting CanLII homepage …")
-        headers = _random_headers()
-        resp = session.get(
-            "https://www.canlii.org/en/",
-            headers=headers,
-            timeout=30,
-        )
-        logger.info("Warmup: HTTP %d (%d bytes)", resp.status_code, len(resp.content))
-        time.sleep(random.uniform(2, 5))
-    except Exception as exc:
-        logger.warning("Warmup failed (non-fatal): %s", exc)
+    cookies = _load_cookies()
+    if cookies:
+        # Check if we have a datadome cookie
+        has_dd = any("datadome" in c.get("name", "").lower() for c in cookies)
+        if has_dd:
+            logger.info("Warmup: using saved DataDome cookies")
+            _get_session()  # Ensures session is created with cookies
+            return
+
+    # No valid cookies — open browser to get them
+    logger.info("Warmup: no DataDome cookies found — opening browser …")
+    cookies = _get_datadome_cookie_via_playwright()
+    if cookies:
+        _get_session()  # Will load the freshly saved cookies
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -171,7 +310,7 @@ def _random_headers() -> dict:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Text extraction (from HTML string, no browser needed)
+# Text extraction (from HTML string)
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _extract_text_from_html(html: str) -> str | None:
@@ -221,7 +360,7 @@ def _to_html_url(url: str) -> str:
 def fetch_case_text(url: str) -> str | None:
     """
     Fetch a CanLII decision page and return its plain text.
-    Uses curl_cffi (Chrome TLS impersonation) — no browser needed.
+    Uses curl_cffi with DataDome cookies from Playwright.
     Returns None on any failure.
     """
     global _consecutive_403s, _fetches_this_session
@@ -251,10 +390,12 @@ def fetch_case_text(url: str) -> str | None:
         status = resp.status_code
 
         if status == 403:
-            # Single retry after a longer pause
-            retry_wait = random.randint(30, 90)
-            logger.warning("    403 on %s — waiting %ds then retrying …", html_url, retry_wait)
-            time.sleep(retry_wait)
+            # DataDome cookie may have expired — try refreshing via Playwright
+            logger.warning("    403 on %s — refreshing DataDome cookie …", html_url)
+            rebuild_session()
+            time.sleep(random.randint(5, 15))
+
+            session = _get_session()
             resp = session.get(html_url, headers=_random_headers(), timeout=45)
             status = resp.status_code
             if status == 403:

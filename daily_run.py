@@ -179,29 +179,71 @@ def _run_fetch_phase(
     return results, failed_ids, errors
 
 
-def _fetch_worker(cases: list[dict], q: queue.Queue, failed_ids: set,
-                  failed_lock: threading.Lock, error_counter: list) -> None:
+def _analyse_worker(q: queue.Queue, results: dict,
+                    results_lock: threading.Lock) -> None:
     """
-    Background thread: fetch case text one at a time (Playwright is single-threaded)
-    and push (case_meta, raw_text) into the queue for the analyser to consume.
+    Background thread: pull (case_meta, raw_text) from the queue,
+    run keyword pre-filter + Claude analysis, and save hits to CSV.
+    Playwright stays on the main thread; only API calls happen here.
     """
-    for case_meta in cases:
+    while True:
+        item = q.get()
+        if item is _SENTINEL:
+            break
+        case_meta, raw_text = item
         title = case_meta["title"]
+
+        # Full-text keyword filter — free, no API call
+        is_candidate, reason = prequalify(raw_text, title)
+        if not is_candidate:
+            logger.info("    [%s] Pre-filter: skipped — %s", title, reason)
+            with results_lock:
+                results["skipped"] += 1
+                results["kw_rejected"] += 1
+            continue
+
+        logger.info("    [%s] Pre-filter: passed — %s", title, reason)
+        with results_lock:
+            results["sent_to_ai"] += 1
+
+        text     = smart_truncate(raw_text, MAX_CASE_CHARS)
+        analysis = analyze_case(
+            text=text,
+            title=title,
+            court=case_meta.get("court_name", ""),
+            province=case_meta.get("province", ""),
+        )
+
+        if analysis is None:
+            logger.warning("    [%s] Analysis failed — skipping", title)
+            with results_lock:
+                results["errors"] += 1
+                results["ai_failed"] += 1
+            continue
+
+        if not analysis.get("is_relevant"):
+            logger.info("    [%s] Not PI — skipping", title)
+            with results_lock:
+                results["skipped"] += 1
+                results["ai_not_pi"] += 1
+            continue
+
         try:
-            raw_text = fetch_case_text(case_meta["url"])
-            if raw_text is None:
-                logger.warning("─── %s\n    fetch failed (403 or empty)", title)
-                with failed_lock:
-                    failed_ids.add(case_meta["case_id"])
-                    error_counter[0] += 1
-            else:
-                logger.info("─── %s\n    fetched: %d chars", title, len(raw_text))
-                q.put((case_meta, raw_text))
+            save_case(case_meta, analysis)
         except Exception as exc:
-            logger.error("Unexpected fetch error for '%s': %s", title, exc)
-            with failed_lock:
-                error_counter[0] += 1
-    q.put(_SENTINEL)  # Signal end of fetching
+            logger.error("    [%s] Save failed: %s — continuing", title, exc)
+            with results_lock:
+                results["errors"] += 1
+            continue
+
+        with results_lock:
+            results["saved"] += 1
+        logger.info(
+            "    [%s] SAVED — %s | total: %s",
+            title,
+            analysis.get("case_type", "?"),
+            (analysis.get("damages") or {}).get("total") or "N/A",
+        )
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
@@ -317,81 +359,60 @@ def run() -> None:
     _save_pending(candidates)
 
     # ── Phase 1+2: Pipelined fetch → analyse ──────────────────────────────────
-    # Fetch thread pushes (case_meta, text) into a queue; main thread pulls
-    # and runs keyword filter + Claude analysis.  This overlaps network I/O
-    # with AI calls, roughly halving wall-clock time.
+    # Main thread fetches (Playwright must stay on the thread that created it).
+    # Background thread runs keyword filter + Claude analysis on each case as
+    # it arrives.  This overlaps network I/O with AI calls.
     warmup()
     logger.info("Pipeline: fetching + analysing %d cases …", len(candidates))
 
-    fetch_q       = queue.Queue(maxsize=5)
+    analyse_q     = queue.Queue(maxsize=5)
     fetch_failed  = set()
-    failed_lock   = threading.Lock()
-    error_counter = [0]   # mutable so the thread can increment it
+    results_lock  = threading.Lock()
+    # Shared counters — analyser thread increments these under lock
+    shared = {
+        "saved": 0, "skipped": 0, "errors": 0,
+        "kw_rejected": 0, "sent_to_ai": 0,
+        "ai_failed": 0, "ai_not_pi": 0,
+    }
 
-    fetcher = threading.Thread(
-        target=_fetch_worker,
-        args=(candidates, fetch_q, fetch_failed, failed_lock, error_counter),
+    analyser = threading.Thread(
+        target=_analyse_worker,
+        args=(analyse_q, shared, results_lock),
         daemon=True,
     )
-    fetcher.start()
+    analyser.start()
 
-    # Consume fetched cases as they arrive — analyse immediately
+    # Main thread: fetch cases and feed them to the analyser
     fetch_ok_count = 0
-    while True:
-        item = fetch_q.get()
-        if item is _SENTINEL:
-            break
-        case_meta, raw_text = item
-        fetch_ok_count += 1
+    for case_meta in candidates:
         title = case_meta["title"]
-
-        # Full-text keyword filter — free, no API call
-        is_candidate, reason = prequalify(raw_text, title)
-        if not is_candidate:
-            logger.info("    [%s] Pre-filter: skipped — %s", title, reason)
-            skipped += 1
-            stats["kw_rejected"] += 1
-            continue
-
-        logger.info("    [%s] Pre-filter: passed — %s", title, reason)
-        stats["sent_to_ai"] += 1
-
-        text     = smart_truncate(raw_text, MAX_CASE_CHARS)
-        analysis = analyze_case(
-            text=text,
-            title=title,
-            court=case_meta.get("court_name", ""),
-            province=case_meta.get("province", ""),
-        )
-
-        if analysis is None:
-            logger.warning("    [%s] Analysis failed — skipping", title)
-            errors += 1
-            stats["ai_failed"] += 1
-            continue
-
-        if not analysis.get("is_relevant"):
-            logger.info("    [%s] Not PI — skipping", title)
-            skipped += 1
-            stats["ai_not_pi"] += 1
-            continue
-
         try:
-            save_case(case_meta, analysis)
+            raw_text = fetch_case_text(case_meta["url"])
+            if raw_text is None:
+                logger.warning("─── %s\n    fetch failed (403 or empty)", title)
+                fetch_failed.add(case_meta["case_id"])
+                errors += 1
+            else:
+                logger.info("─── %s\n    fetched: %d chars", title, len(raw_text))
+                fetch_ok_count += 1
+                analyse_q.put((case_meta, raw_text))
         except Exception as exc:
-            logger.error("    [%s] Save failed: %s — continuing", title, exc)
+            logger.error("Unexpected fetch error for '%s': %s", title, exc)
             errors += 1
-            continue
-        saved += 1
-        logger.info(
-            "    [%s] SAVED — %s | total: %s",
-            title,
-            analysis.get("case_type", "?"),
-            (analysis.get("damages") or {}).get("total") or "N/A",
-        )
 
-    fetcher.join()
-    errors += error_counter[0]
+    # Signal end of fetching and wait for analyser to finish
+    analyse_q.put(_SENTINEL)
+    analyser.join()
+
+    # Merge shared counters back
+    with results_lock:
+        saved   += shared["saved"]
+        skipped += shared["skipped"]
+        errors  += shared["errors"]
+        stats["kw_rejected"] = shared["kw_rejected"]
+        stats["sent_to_ai"]  = shared["sent_to_ai"]
+        stats["ai_failed"]   = shared["ai_failed"]
+        stats["ai_not_pi"]   = shared["ai_not_pi"]
 
     stats["fetch_ok"]     = fetch_ok_count
     stats["fetch_failed"] = len(fetch_failed)

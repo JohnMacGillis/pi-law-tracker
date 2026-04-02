@@ -124,23 +124,49 @@ def _get_datadome_cookie_via_playwright() -> list[dict]:
                 timeout=120_000,
                 polling=3_000,
             )
-            logger.info("CanLII loaded — extracting cookies.")
+            logger.info("CanLII loaded.")
         except PWTimeout:
             logger.warning("Timed out waiting for CanLII — proceeding with whatever cookies we have.")
 
-        # Browse a bit to look human
+        # Wait for DataDome cookie to fully settle — it can take several
+        # seconds after the page appears to load before the cookie is set.
+        logger.info("Waiting for DataDome cookie to settle …")
+        dd_found = False
+        for _attempt in range(20):   # check every 1s for up to 20s
+            cookies_now = ctx.cookies()
+            if any("datadome" in c.get("name", "").lower() for c in cookies_now):
+                dd_found = True
+                logger.info("DataDome cookie found after %ds", _attempt + 1)
+                break
+            page.wait_for_timeout(1000)
+
+        if not dd_found:
+            logger.warning("No DataDome cookie detected — fetching may 403")
+
+        # Browse a bit more to look human and let any final cookies settle
         try:
-            page.wait_for_timeout(random.randint(1500, 3000))
+            page.wait_for_timeout(random.randint(3000, 6000))
             links = page.query_selector_all("a[href*='/en/']")
             if links:
                 random.choice(links[:10]).click()
-                page.wait_for_timeout(random.randint(2000, 4000))
+                page.wait_for_timeout(random.randint(3000, 6000))
+
+            # Visit an actual case page to confirm cookies work
+            page.goto(
+                "https://www.canlii.org/en/nb/nbkb/",
+                wait_until="domcontentloaded", timeout=30_000,
+            )
+            page.wait_for_timeout(random.randint(2000, 4000))
         except Exception:
             pass
 
+        # Extra settle time — DataDome sometimes updates cookies after navigation
+        page.wait_for_timeout(3000)
+
         # Extract all cookies
         cookies = ctx.cookies()
-        logger.info("Got %d cookies from browser", len(cookies))
+        dd_cookies = [c["name"] for c in cookies if "datadome" in c["name"].lower()]
+        logger.info("Got %d cookies from browser (datadome: %s)", len(cookies), dd_cookies)
 
         _save_cookies(cookies)
 

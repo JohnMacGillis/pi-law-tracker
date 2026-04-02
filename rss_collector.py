@@ -14,7 +14,7 @@ import feedparser
 import requests
 
 from config import REQUEST_DELAY_SECONDS
-from courts import COURTS
+import courts
 
 _RSS_TIMEOUT = 15  # seconds per feed request
 _RSS_USER_AGENT = (
@@ -62,7 +62,7 @@ def fetch_new_cases(seen_ids: set) -> list[dict]:
     feed_health: list[dict] = []       # per-court health tracking
     failed_feeds: list[str] = []
 
-    for court in COURTS:
+    for court in courts.COURTS:
         logger.info("Fetching RSS → %s", court["name"])
         court_new = 0
         try:

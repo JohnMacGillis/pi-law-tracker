@@ -23,7 +23,7 @@ from datetime import datetime, timedelta
 import requests
 
 from config import CANLII_API_KEY
-from courts import COURTS
+import courts
 
 logger = logging.getLogger(__name__)
 
@@ -224,12 +224,12 @@ def fetch_new_cases(seen_ids: set) -> list[dict]:
 
     logger.info(
         "CanLII API: fetching latest cases from %d courts …",
-        len(COURTS),
+        len(courts.COURTS),
     )
 
     new_cases: list[dict] = []
 
-    for court in COURTS:
+    for court in courts.COURTS:
         db_id      = court["db_id"]
         province   = court["province"]
         court_name = court["name"]

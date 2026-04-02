@@ -85,12 +85,13 @@ def _fetch_ns(citation: str, title: str, col: str) -> str | None:
     """
     Search the NS court site for a decision by citation, then fetch its text.
     """
-    # Step 1: Search by citation (most reliable match)
+    # Step 1: Search by citation using full-text exact-phrase search.
+    # The `cont` parameter with quoted citation auto-executes the search.
+    # The `ref` parameter only pre-fills the form without executing.
     search_url = f"{_NS_BASE}/nsc/en/d/s/index.do"
     params = {
         "iframe": "true",
-        "ref": citation,
-        "col": col,
+        "cont": f'"{citation}"',
     }
 
     time.sleep(random.uniform(1.0, 3.0))
@@ -105,7 +106,8 @@ def _fetch_ns(citation: str, title: str, col: str) -> str | None:
     item_link = soup.select_one("li.list-item-expanded .title a[href*='/item/']")
     if not item_link:
         # Try searching by title as fallback
-        params["ref"] = title.split(" v. ")[0].strip() if " v. " in title else title[:50]
+        title_query = title.split(" v. ")[0].strip() if " v. " in title else title[:50]
+        params["cont"] = f'"{title_query}"'
         time.sleep(random.uniform(1.0, 2.0))
         resp = requests.get(search_url, params=params, headers=_HEADERS, timeout=30)
         if resp.ok:

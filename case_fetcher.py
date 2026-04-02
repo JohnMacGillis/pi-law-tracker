@@ -23,6 +23,12 @@ import time
 
 from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
 
+try:
+    from playwright_stealth import stealth_sync
+    _HAS_STEALTH = True
+except ImportError:
+    _HAS_STEALTH = False
+
 from config import REQUEST_DELAY_SECONDS, DATA_DIR
 
 logger = logging.getLogger(__name__)
@@ -172,34 +178,40 @@ def _get_context():
         user_agent=ua,
     )
 
-    # Remove automation fingerprints that bot-detection looks for
-    _context.add_init_script("""
-        // Hide webdriver flag
-        Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+    # Apply playwright-stealth patches (covers webdriver, chrome runtime,
+    # plugins, permissions, iframe contentWindow, etc.)
+    if _HAS_STEALTH:
+        logger.info("Applying playwright-stealth patches")
+    else:
+        logger.warning(
+            "playwright-stealth not installed — run: pip install playwright-stealth"
+        )
+        # Minimal fallback: just hide the webdriver flag
+        _context.add_init_script(
+            "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
+        )
 
-        // Hide automation-related properties
-        delete window.cdc_adoQpoasnfa76pfcZLmcfl_Array;
-        delete window.cdc_adoQpoasnfa76pfcZLmcfl_Promise;
-        delete window.cdc_adoQpoasnfa76pfcZLmcfl_Symbol;
-
-        // Realistic plugin/mime arrays (Chrome on Windows/Mac)
-        Object.defineProperty(navigator, 'plugins', {
-            get: () => [1, 2, 3, 4, 5],
-        });
-        Object.defineProperty(navigator, 'languages', {
-            get: () => ['en-CA', 'en-US', 'en'],
-        });
-
-        // Realistic Chrome object
-        window.chrome = { runtime: {}, loadTimes: function(){}, csi: function(){} };
-
-        // Realistic permissions query
-        const origQuery = window.navigator.permissions.query;
-        window.navigator.permissions.query = (parameters) =>
-            parameters.name === 'notifications'
-                ? Promise.resolve({ state: Notification.permission })
-                : origQuery(parameters);
-    """)
+    # Warm up the session — visit CanLII homepage first to establish
+    # a legitimate DataDome session before hitting case pages.
+    try:
+        warmup_page = _context.new_page()
+        if _HAS_STEALTH:
+            stealth_sync(warmup_page)
+        warmup_page.goto("https://www.canlii.org/en/", wait_until="domcontentloaded", timeout=30_000)
+        warmup_page.wait_for_timeout(random.randint(2000, 5000))
+        # Click a random link to look like browsing (search page or a province)
+        try:
+            links = warmup_page.query_selector_all("a[href*='/en/']")
+            if links:
+                pick = random.choice(links[:10])
+                pick.click()
+                warmup_page.wait_for_timeout(random.randint(1500, 4000))
+        except Exception:
+            pass
+        warmup_page.close()
+        logger.info("Session warmup complete — DataDome cookies established")
+    except Exception as exc:
+        logger.warning("Session warmup failed (non-fatal): %s", exc)
 
     logger.info(
         "Playwright started (session: %s)",
@@ -482,6 +494,8 @@ def fetch_case_text(url: str) -> str | None:
 
     ctx  = _get_context()
     page = ctx.new_page()
+    if _HAS_STEALTH:
+        stealth_sync(page)
     _apply_profile(page)
 
     try:

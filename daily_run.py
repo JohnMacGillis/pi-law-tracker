@@ -23,10 +23,13 @@ Cookie refresh:
   Cases that still fail are un-marked so tomorrow's run retries them.
 """
 
+import argparse
 import json
 import logging
 import os
+import queue
 import sys
+import threading
 import time
 from datetime import datetime
 
@@ -143,16 +146,15 @@ def _clear_pending() -> None:
         pass
 
 
-# ── PDF fetch helper (called twice when retry is needed) ──────────────────────
+# ── Fetch + analyse helpers ────────────────────────────────────────────────────
+
+_SENTINEL = None  # Marks end of fetch queue
 
 def _run_fetch_phase(
     cases: list[dict],
 ) -> tuple[list[tuple[dict, str]], set[str], int]:
     """
     Fetch case text sequentially.
-    Playwright's sync API is not thread-safe, so we iterate rather than
-    using a thread pool.  Rate limiting is handled inside fetch_case_text.
-
     Returns (fetch_results, failed_ids, error_count).
     """
     results:    list[tuple[dict, str]] = []
@@ -175,6 +177,31 @@ def _run_fetch_phase(
             errors += 1
 
     return results, failed_ids, errors
+
+
+def _fetch_worker(cases: list[dict], q: queue.Queue, failed_ids: set,
+                  failed_lock: threading.Lock, error_counter: list) -> None:
+    """
+    Background thread: fetch case text one at a time (Playwright is single-threaded)
+    and push (case_meta, raw_text) into the queue for the analyser to consume.
+    """
+    for case_meta in cases:
+        title = case_meta["title"]
+        try:
+            raw_text = fetch_case_text(case_meta["url"])
+            if raw_text is None:
+                logger.warning("─── %s\n    fetch failed (403 or empty)", title)
+                with failed_lock:
+                    failed_ids.add(case_meta["case_id"])
+                    error_counter[0] += 1
+            else:
+                logger.info("─── %s\n    fetched: %d chars", title, len(raw_text))
+                q.put((case_meta, raw_text))
+        except Exception as exc:
+            logger.error("Unexpected fetch error for '%s': %s", title, exc)
+            with failed_lock:
+                error_counter[0] += 1
+    q.put(_SENTINEL)  # Signal end of fetching
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
@@ -289,58 +316,33 @@ def run() -> None:
     # ── Checkpoint: save candidates so a crash can resume from here ────────
     _save_pending(candidates)
 
-    # ── Phase 1: Fetch case text ───────────────────────────────────────────────
-    # Warm up the browser session first — if CanLII shows a CAPTCHA the user
-    # can solve it in the visible browser window before fetching begins.
+    # ── Phase 1+2: Pipelined fetch → analyse ──────────────────────────────────
+    # Fetch thread pushes (case_meta, text) into a queue; main thread pulls
+    # and runs keyword filter + Claude analysis.  This overlaps network I/O
+    # with AI calls, roughly halving wall-clock time.
     warmup()
-    logger.info("Phase 1: fetching %d cases sequentially …", len(candidates))
+    logger.info("Pipeline: fetching + analysing %d cases …", len(candidates))
 
-    fetch_results, fetch_failed_ids, phase1_errors = _run_fetch_phase(candidates)
-    errors += phase1_errors
+    fetch_q       = queue.Queue(maxsize=5)
+    fetch_failed  = set()
+    failed_lock   = threading.Lock()
+    error_counter = [0]   # mutable so the thread can increment it
 
-    # ── Cookie refresh + same-run retry ───────────────────────────────────────
-    cookie_refreshed = False
-
-    if needs_cookie_refresh():
-        _send_cookie_alert()
-        cookie_refreshed = _trigger_cookie_refresh()
-        if cookie_refreshed:
-            rebuild_session()
-            reset_403_counter()
-
-    if cookie_refreshed and fetch_failed_ids:
-        retry_cases = [c for c in candidates if c["case_id"] in fetch_failed_ids]
-        logger.info(
-            "Retrying %d cases after cookie refresh (%ds cooldown) …",
-            len(retry_cases), RETRY_COOLDOWN_SEC,
-        )
-        time.sleep(RETRY_COOLDOWN_SEC)
-
-        # Subtract the error count for cases we're retrying
-        errors -= len(retry_cases)
-
-        retry_results, still_failed, retry_errors = _run_fetch_phase(retry_cases)
-        fetch_results.extend(retry_results)
-        fetch_failed_ids = still_failed
-        errors += retry_errors
-
-    # Un-mark cases that STILL failed so tomorrow's run picks them up
-    if fetch_failed_ids:
-        unmark_seen(fetch_failed_ids)
-        logger.info(
-            "%d case(s) still failing — un-marked for tomorrow's retry.",
-            len(fetch_failed_ids),
-        )
-
-    # ── Phase 2: Full-text pre-filter + Claude analysis ───────────────────────
-    stats["fetch_ok"]     = len(fetch_results)
-    stats["fetch_failed"] = len(fetch_failed_ids)
-
-    logger.info(
-        "Phase 2: analysing %d fetched cases …", len(fetch_results)
+    fetcher = threading.Thread(
+        target=_fetch_worker,
+        args=(candidates, fetch_q, fetch_failed, failed_lock, error_counter),
+        daemon=True,
     )
+    fetcher.start()
 
-    for case_meta, raw_text in fetch_results:
+    # Consume fetched cases as they arrive — analyse immediately
+    fetch_ok_count = 0
+    while True:
+        item = fetch_q.get()
+        if item is _SENTINEL:
+            break
+        case_meta, raw_text = item
+        fetch_ok_count += 1
         title = case_meta["title"]
 
         # Full-text keyword filter — free, no API call
@@ -386,6 +388,68 @@ def run() -> None:
             title,
             analysis.get("case_type", "?"),
             (analysis.get("damages") or {}).get("total") or "N/A",
+        )
+
+    fetcher.join()
+    errors += error_counter[0]
+
+    stats["fetch_ok"]     = fetch_ok_count
+    stats["fetch_failed"] = len(fetch_failed)
+
+    # ── Cookie refresh + retry for failed cases ───────────────────────────────
+    if needs_cookie_refresh():
+        _send_cookie_alert()
+        if _trigger_cookie_refresh():
+            rebuild_session()
+            reset_403_counter()
+
+            retry_cases = [c for c in candidates if c["case_id"] in fetch_failed]
+            if retry_cases:
+                logger.info(
+                    "Retrying %d cases after session reset (%ds cooldown) …",
+                    len(retry_cases), RETRY_COOLDOWN_SEC,
+                )
+                time.sleep(RETRY_COOLDOWN_SEC)
+                errors -= len(retry_cases)
+
+                retry_results, still_failed, retry_errors = _run_fetch_phase(retry_cases)
+                fetch_failed = still_failed
+                errors += retry_errors
+
+                # Analyse retried cases immediately
+                for case_meta, raw_text in retry_results:
+                    title = case_meta["title"]
+                    stats["fetch_ok"] += 1
+
+                    is_cand, reason = prequalify(raw_text, title)
+                    if not is_cand:
+                        skipped += 1
+                        stats["kw_rejected"] += 1
+                        continue
+
+                    stats["sent_to_ai"] += 1
+                    text     = smart_truncate(raw_text, MAX_CASE_CHARS)
+                    analysis = analyze_case(
+                        text=text, title=title,
+                        court=case_meta.get("court_name", ""),
+                        province=case_meta.get("province", ""),
+                    )
+                    if analysis is None:
+                        errors += 1; stats["ai_failed"] += 1; continue
+                    if not analysis.get("is_relevant"):
+                        skipped += 1; stats["ai_not_pi"] += 1; continue
+                    try:
+                        save_case(case_meta, analysis)
+                    except Exception as exc:
+                        errors += 1; continue
+                    saved += 1
+
+    # Un-mark cases that STILL failed so tomorrow's run picks them up
+    if fetch_failed:
+        unmark_seen(fetch_failed)
+        logger.info(
+            "%d case(s) still failing — un-marked for tomorrow's retry.",
+            len(fetch_failed),
         )
 
     elapsed = (datetime.now() - start).seconds
@@ -546,7 +610,26 @@ def _send_crash_alert(error: Exception) -> None:
         logger.warning("Could not send crash alert email: %s", exc)
 
 
+def _parse_args():
+    parser = argparse.ArgumentParser(description="PI Law Tracker daily pipeline")
+    parser.add_argument(
+        "--provinces", type=str, default=None,
+        help="Comma-separated province codes to limit collection (e.g. NB,NS,NL,PE)",
+    )
+    return parser.parse_args()
+
+
 if __name__ == "__main__":
+    args = _parse_args()
+
+    # Province filter — limit which courts we pull from
+    if args.provinces:
+        province_set = {p.strip().upper() for p in args.provinces.split(",")}
+        from courts import COURTS as _ALL_COURTS
+        import courts
+        courts.COURTS = [c for c in _ALL_COURTS if c["province"] in province_set]
+        logger.info("Province filter: %s (%d courts)", args.provinces, len(courts.COURTS))
+
     try:
         run()
     except Exception as exc:

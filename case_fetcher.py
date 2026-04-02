@@ -24,6 +24,7 @@ from curl_cffi import requests as cffi_requests
 from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
 
 from config import REQUEST_DELAY_SECONDS, DATA_DIR
+from court_fetcher import can_fetch_from_court, fetch_from_court
 
 logger = logging.getLogger(__name__)
 
@@ -383,10 +384,13 @@ def _to_html_url(url: str) -> str:
 # Public fetch function
 # ─────────────────────────────────────────────────────────────────────────────
 
-def fetch_case_text(url: str) -> str | None:
+def fetch_case_text(url: str, db_id: str = "", citation: str = "",
+                    title: str = "") -> str | None:
     """
-    Fetch a CanLII decision page and return its plain text.
-    Uses curl_cffi with DataDome cookies from Playwright.
+    Fetch a court decision and return its plain text.
+
+    Tries the provincial court website first (no bot protection) if the
+    court is supported. Falls back to CanLII via curl_cffi if not.
     Returns None on any failure.
     """
     global _consecutive_403s, _fetches_this_session
@@ -394,6 +398,15 @@ def fetch_case_text(url: str) -> str | None:
     if not url:
         return None
 
+    # ── Try court website first (no DataDome, no 403s) ────────────────────
+    if db_id and can_fetch_from_court(db_id):
+        logger.info("    Trying court website for %s …", db_id)
+        text = fetch_from_court(db_id, citation, title)
+        if text:
+            return text
+        logger.info("    Court website miss — falling back to CanLII")
+
+    # ── Fall back to CanLII via curl_cffi ─────────────────────────────────
     # Session rotation — fresh cookies every N fetches
     if _fetches_this_session >= _SESSION_ROTATE_EVERY:
         rotate_wait = random.randint(10, 30)

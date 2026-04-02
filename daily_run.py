@@ -164,7 +164,12 @@ def _run_fetch_phase(
     for case_meta in cases:
         title = case_meta["title"]
         try:
-            raw_text = fetch_case_text(case_meta["url"])
+            raw_text = fetch_case_text(
+                case_meta["url"],
+                db_id=case_meta.get("db_id", ""),
+                citation=case_meta.get("citation", ""),
+                title=title,
+            )
             if raw_text is None:
                 logger.warning("─── %s\n    fetch failed (403 or empty)", title)
                 failed_ids.add(case_meta["case_id"])
@@ -387,7 +392,12 @@ def run() -> None:
     for case_meta in candidates:
         title = case_meta["title"]
         try:
-            raw_text = fetch_case_text(case_meta["url"])
+            raw_text = fetch_case_text(
+                case_meta["url"],
+                db_id=case_meta.get("db_id", ""),
+                citation=case_meta.get("citation", ""),
+                title=title,
+            )
             if raw_text is None:
                 logger.warning("─── %s\n    fetch failed (403 or empty)", title)
                 fetch_failed.add(case_meta["case_id"])

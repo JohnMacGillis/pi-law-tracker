@@ -122,6 +122,10 @@ _context = None
 _403_THRESHOLD    = 3
 _consecutive_403s = 0
 
+# ── Session rotation — look like different users over time ────────────────────
+_SESSION_ROTATE_EVERY = 8    # Rebuild browser every N successful fetches
+_fetches_this_session = 0
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Browser lifecycle
@@ -456,10 +460,22 @@ def fetch_case_text(url: str) -> str | None:
     Navigate to the CanLII HTML decision page and return its plain text.
     Returns None on any failure.
     """
-    global _consecutive_403s
+    global _consecutive_403s, _fetches_this_session
 
     if not url:
         return None
+
+    # Session rotation — tear down and rebuild the browser every N fetches
+    # so DataDome sees what looks like different users.
+    if _fetches_this_session >= _SESSION_ROTATE_EVERY and _context is not None:
+        rotate_wait = random.randint(15, 45)
+        logger.info(
+            "Session rotation after %d fetches — pausing %ds, rebuilding …",
+            _fetches_this_session, rotate_wait,
+        )
+        rebuild_session()   # closes browser + deletes saved state
+        time.sleep(rotate_wait)
+        _fetches_this_session = 0
 
     html_url = _to_html_url(url)
     _pause()
@@ -504,6 +520,7 @@ def fetch_case_text(url: str) -> str | None:
                 return None
 
         _consecutive_403s = 0
+        _fetches_this_session += 1
 
         # Simulate human reading behaviour — mouse movement + scroll
         _simulate_human(page)
